@@ -194,6 +194,10 @@ export async function runLoop(options: RuntimeOptions): Promise<void> {
 	console.log(`  Duration:  ${formatDuration(duration)}`);
 	if (result.totalInputTokens > 0 || result.totalOutputTokens > 0) {
 		console.log(`  Tokens:    ${formatTokens(result.totalInputTokens, result.totalOutputTokens)}`);
+		if (isSupervisorMode && "supervisorInputTokens" in result) {
+			console.log(`    Supervisor: ${formatTokens(result.supervisorInputTokens, result.supervisorOutputTokens)}`);
+			console.log(`    Worker:     ${formatTokens(result.workerInputTokens, result.workerOutputTokens)}`);
+		}
 	}
 	console.log("=".repeat(50));
 

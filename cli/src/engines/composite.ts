@@ -9,6 +9,8 @@ export interface DelegationResult {
 	delegationPrompt: string;
 	context: string;
 	acceptanceCriteria: string[];
+	inputTokens: number;
+	outputTokens: number;
 	error?: string;
 }
 
@@ -32,6 +34,8 @@ export interface ReviewResult {
 	feedback: string;
 	issues: ReviewIssue[];
 	suggestions: string[];
+	inputTokens: number;
+	outputTokens: number;
 	error?: string;
 }
 
@@ -117,6 +121,8 @@ export class CompositeEngine implements AIEngine {
 					delegationPrompt: "",
 					context: "",
 					acceptanceCriteria: [],
+					inputTokens: result.inputTokens,
+					outputTokens: result.outputTokens,
 					error: result.error || "Delegation failed",
 				};
 			}
@@ -157,6 +163,8 @@ export class CompositeEngine implements AIEngine {
 				delegationPrompt,
 				context: parsed.context || "",
 				acceptanceCriteria,
+				inputTokens: result.inputTokens,
+				outputTokens: result.outputTokens,
 			};
 		} catch (error) {
 			const errorMsg = error instanceof Error ? error.message : String(error);
@@ -166,6 +174,8 @@ export class CompositeEngine implements AIEngine {
 				delegationPrompt: "",
 				context: "",
 				acceptanceCriteria: [],
+				inputTokens: 0,
+				outputTokens: 0,
 				error: errorMsg,
 			};
 		}
@@ -213,6 +223,8 @@ export class CompositeEngine implements AIEngine {
 					feedback: result.error || "Review failed",
 					issues: [],
 					suggestions: [],
+					inputTokens: result.inputTokens,
+					outputTokens: result.outputTokens,
 					error: result.error || "Review failed",
 				};
 			}
@@ -262,6 +274,8 @@ export class CompositeEngine implements AIEngine {
 				feedback,
 				issues,
 				suggestions,
+				inputTokens: result.inputTokens,
+				outputTokens: result.outputTokens,
 			};
 		} catch (error) {
 			const errorMsg = error instanceof Error ? error.message : String(error);
@@ -273,6 +287,8 @@ export class CompositeEngine implements AIEngine {
 				feedback: `Review parsing failed: ${errorMsg}`,
 				issues: [],
 				suggestions: [],
+				inputTokens: 0,
+				outputTokens: 0,
 				error: errorMsg,
 			};
 		}

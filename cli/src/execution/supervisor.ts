@@ -1,17 +1,17 @@
+import { logTaskProgress } from "../config/writer.ts";
+import { execCommand } from "../engines/base.ts";
 import type { CompositeEngine, DelegationResult, ReviewResult } from "../engines/composite.ts";
 import type { AIResult } from "../engines/types.ts";
-import type { Task, TaskSource } from "../tasks/types.ts";
 import { createTaskBranch, returnToBaseBranch } from "../git/branch.ts";
 import { createPullRequest } from "../git/pr.ts";
-import { logTaskProgress } from "../config/writer.ts";
+import type { Task, TaskSource } from "../tasks/types.ts";
 import { logDebug, logError, logInfo, logSuccess, logWarn } from "../ui/logger.ts";
-import { ProgressSpinner } from "../ui/spinner.ts";
 import { notifyTaskComplete, notifyTaskFailed } from "../ui/notify.ts";
+import { ProgressSpinner } from "../ui/spinner.ts";
 import { buildDelegationPrompt } from "./prompts/delegation.ts";
 import { buildImplementationPrompt } from "./prompts/implementation.ts";
 import { buildReviewPrompt } from "./prompts/review.ts";
 import { isRetryableError, withRetry } from "./retry.ts";
-import { execCommand } from "../engines/base.ts";
 
 export interface SupervisorExecutionOptions {
 	compositeEngine: CompositeEngine;
@@ -36,6 +36,10 @@ export interface SupervisorExecutionResult {
 	tasksWithWarnings: number;
 	totalInputTokens: number;
 	totalOutputTokens: number;
+	supervisorInputTokens: number;
+	supervisorOutputTokens: number;
+	workerInputTokens: number;
+	workerOutputTokens: number;
 }
 
 export interface SupervisorTaskResult {
@@ -45,6 +49,10 @@ export interface SupervisorTaskResult {
 	cycles: number;
 	totalInputTokens: number;
 	totalOutputTokens: number;
+	supervisorInputTokens: number;
+	supervisorOutputTokens: number;
+	workerInputTokens: number;
+	workerOutputTokens: number;
 	error?: string;
 }
 
@@ -79,11 +87,7 @@ function formatFeedbackForWorker(review: ReviewResult): string {
 /**
  * Commit changes with descriptive message
  */
-async function commitChanges(
-	task: Task,
-	review: ReviewResult,
-	workDir: string
-): Promise<void> {
+async function commitChanges(task: Task, review: ReviewResult, workDir: string): Promise<void> {
 	try {
 		// Stage all changes
 		await execCommand("git", ["add", "."], workDir);
@@ -113,7 +117,7 @@ Co-Authored-By: Ralphy Supervisor <ralphy@ralphy.dev>`;
 async function runSupervisorTask(
 	task: Task,
 	compositeEngine: CompositeEngine,
-	options: SupervisorExecutionOptions
+	options: SupervisorExecutionOptions,
 ): Promise<SupervisorTaskResult> {
 	const { workDir, maxRetries, retryDelay, autoCommit } = options;
 	const maxCycles = compositeEngine.getOptions().maxReviewCycles;
@@ -124,6 +128,10 @@ async function runSupervisorTask(
 
 	let totalInputTokens = 0;
 	let totalOutputTokens = 0;
+	let supervisorInputTokens = 0;
+	let supervisorOutputTokens = 0;
+	let workerInputTokens = 0;
+	let workerOutputTokens = 0;
 
 	// Step 1: Supervisor delegates the task
 	const spinner = new ProgressSpinner(task.title);
@@ -147,12 +155,14 @@ async function runSupervisorTask(
 				onRetry: (attempt) => {
 					spinner.updateStep(`Delegating (retry ${attempt})`);
 				},
-			}
+			},
 		);
 
-		// Track delegation tokens (we called supervisor.execute indirectly)
-		// Note: tokens are tracked inside CompositeEngine.delegate()
-		logDebug(`Delegation successful: ${delegation.acceptanceCriteria.length} acceptance criteria`);
+		// Track delegation tokens
+		totalInputTokens += delegation.inputTokens;
+		totalOutputTokens += delegation.outputTokens;
+		supervisorInputTokens += delegation.inputTokens;
+		supervisorOutputTokens += delegation.outputTokens;
 	} catch (error) {
 		const errorMsg = error instanceof Error ? error.message : String(error);
 		spinner.error(errorMsg);
@@ -163,6 +173,10 @@ async function runSupervisorTask(
 			cycles: 0,
 			totalInputTokens: 0,
 			totalOutputTokens: 0,
+			supervisorInputTokens: 0,
+			supervisorOutputTokens: 0,
+			workerInputTokens: 0,
+			workerOutputTokens: 0,
 			error: errorMsg,
 		};
 	}
@@ -194,11 +208,13 @@ async function runSupervisorTask(
 					onRetry: (attempt) => {
 						spinner.updateStep(`Implementing (cycle ${cycle}/${maxCycles}, retry ${attempt})`);
 					},
-				}
+				},
 			);
 
 			totalInputTokens += implResult.inputTokens;
 			totalOutputTokens += implResult.outputTokens;
+			workerInputTokens += implResult.inputTokens;
+			workerOutputTokens += implResult.outputTokens;
 
 			if (!implResult.success) {
 				spinner.error(implResult.error || "Implementation failed");
@@ -209,6 +225,10 @@ async function runSupervisorTask(
 					cycles: cycle,
 					totalInputTokens,
 					totalOutputTokens,
+					supervisorInputTokens,
+					supervisorOutputTokens,
+					workerInputTokens,
+					workerOutputTokens,
 					error: implResult.error || "Implementation failed",
 				};
 			}
@@ -224,6 +244,10 @@ async function runSupervisorTask(
 				cycles: cycle,
 				totalInputTokens,
 				totalOutputTokens,
+				supervisorInputTokens,
+				supervisorOutputTokens,
+				workerInputTokens,
+				workerOutputTokens,
 				error: errorMsg,
 			};
 		}
@@ -236,7 +260,7 @@ async function runSupervisorTask(
 			delegation,
 			implResult,
 			workDir,
-			cycle
+			cycle,
 		);
 
 		let reviewResult: ReviewResult;
@@ -248,7 +272,7 @@ async function runSupervisorTask(
 						delegation,
 						implResult,
 						workDir,
-						cycle
+						cycle,
 					);
 					if (!result.success) {
 						throw new Error(result.error || "Review failed");
@@ -261,11 +285,17 @@ async function runSupervisorTask(
 					onRetry: (attempt) => {
 						spinner.updateStep(`Reviewing (cycle ${cycle}/${maxCycles}, retry ${attempt})`);
 					},
-				}
+				},
 			);
 
-			// Note: tokens tracked inside CompositeEngine.review()
-			logDebug(`Review cycle ${cycle} completed: score ${reviewResult.score.toFixed(2)}, approved: ${reviewResult.approved}`);
+			// Track review tokens
+			totalInputTokens += reviewResult.inputTokens;
+			totalOutputTokens += reviewResult.outputTokens;
+			supervisorInputTokens += reviewResult.inputTokens;
+			supervisorOutputTokens += reviewResult.outputTokens;
+			logDebug(
+				`Review cycle ${cycle} completed: score ${reviewResult.score.toFixed(2)}, approved: ${reviewResult.approved}`,
+			);
 			finalReview = reviewResult;
 		} catch (error) {
 			const errorMsg = error instanceof Error ? error.message : String(error);
@@ -277,6 +307,10 @@ async function runSupervisorTask(
 				cycles: cycle,
 				totalInputTokens,
 				totalOutputTokens,
+				supervisorInputTokens,
+				supervisorOutputTokens,
+				workerInputTokens,
+				workerOutputTokens,
 				error: errorMsg,
 			};
 		}
@@ -291,12 +325,14 @@ async function runSupervisorTask(
 
 		// Check if more cycles available
 		if (cycle < maxCycles) {
-			logWarn(`Not approved (score: ${reviewResult.score.toFixed(2)}), starting cycle ${cycle + 1}`);
+			logWarn(
+				`Not approved (score: ${reviewResult.score.toFixed(2)}), starting cycle ${cycle + 1}`,
+			);
 			lastFeedback = formatFeedbackForWorker(reviewResult);
 		} else {
 			// Max cycles reached
 			logWarn(
-				`Max review cycles (${maxCycles}) reached. Score: ${reviewResult.score.toFixed(2)}, approved: ${reviewResult.approved}`
+				`Max review cycles (${maxCycles}) reached. Score: ${reviewResult.score.toFixed(2)}, approved: ${reviewResult.approved}`,
 			);
 			spinner.success(`Completed with warnings (score: ${reviewResult.score.toFixed(2)})`);
 		}
@@ -318,6 +354,10 @@ async function runSupervisorTask(
 		cycles: finalReview ? maxCycles : 0,
 		totalInputTokens,
 		totalOutputTokens,
+		supervisorInputTokens,
+		supervisorOutputTokens,
+		workerInputTokens,
+		workerOutputTokens,
 	};
 }
 
@@ -325,7 +365,7 @@ async function runSupervisorTask(
  * Run supervisor mode execution
  */
 export async function runSupervisor(
-	options: SupervisorExecutionOptions
+	options: SupervisorExecutionOptions,
 ): Promise<SupervisorExecutionResult> {
 	const {
 		compositeEngine,
@@ -341,6 +381,10 @@ export async function runSupervisor(
 
 	const result: SupervisorExecutionResult = {
 		tasksCompleted: 0,
+		supervisorInputTokens: 0,
+		supervisorOutputTokens: 0,
+		workerInputTokens: 0,
+		workerOutputTokens: 0,
 		tasksFailed: 0,
 		tasksWithWarnings: 0,
 		totalInputTokens: 0,
@@ -388,6 +432,10 @@ export async function runSupervisor(
 
 			result.totalInputTokens += taskResult.totalInputTokens;
 			result.totalOutputTokens += taskResult.totalOutputTokens;
+			result.supervisorInputTokens += taskResult.supervisorInputTokens;
+			result.supervisorOutputTokens += taskResult.supervisorOutputTokens;
+			result.workerInputTokens += taskResult.workerInputTokens;
+			result.workerOutputTokens += taskResult.workerOutputTokens;
 
 			if (taskResult.success) {
 				// Mark task complete
@@ -419,7 +467,7 @@ export async function runSupervisor(
 						task.title,
 						prBody,
 						draftPr,
-						workDir
+						workDir,
 					);
 
 					if (prUrl) {
