@@ -26,6 +26,10 @@ export function createProgram(): Command {
 		.option("--codex", "Use Codex")
 		.option("--qwen", "Use Qwen-Code")
 		.option("--droid", "Use Factory Droid")
+		.option("--supervisor <engine>", "Senior AI engine for supervisor mode")
+		.option("--worker <engine>", "Junior AI engine for supervisor mode")
+		.option("--review-cycles <n>", "Maximum review cycles in supervisor mode", "3")
+		.option("--approve-threshold <n>", "Approval threshold 0-1 in supervisor mode", "0.8")
 		.option("--dry-run", "Show what would be done without executing")
 		.option("--max-iterations <n>", "Maximum iterations (0 = unlimited)", "0")
 		.option("--max-retries <n>", "Maximum retries per task", "3")
@@ -63,6 +67,27 @@ export function parseArgs(args: string[]): {
 
 	const opts = program.opts();
 	const [task] = program.args;
+
+	// Supervisor mode validation
+	const supervisorEngine = opts.supervisor;
+	const workerEngine = opts.worker;
+
+	if ((supervisorEngine && !workerEngine) || (!supervisorEngine && workerEngine)) {
+		console.error("Error: Both --supervisor and --worker must be specified together");
+		process.exit(1);
+	}
+
+	// Validate approve threshold
+	const approveThreshold = parseFloat(opts.approveThreshold);
+	if (approveThreshold < 0 || approveThreshold > 1) {
+		console.error("Error: --approve-threshold must be between 0 and 1");
+		process.exit(1);
+	}
+
+	// Warn about parallel mode with supervisor
+	if (supervisorEngine && opts.parallel) {
+		console.warn("Warning: --parallel is not supported with supervisor mode. Running sequentially.");
+	}
 
 	// Determine AI engine
 	let aiEngine = "claude";
@@ -107,7 +132,13 @@ export function parseArgs(args: string[]): {
 		githubRepo: opts.github || "",
 		githubLabel: opts.githubLabel || "",
 		autoCommit: opts.commit !== false,
+		autoCommit: opts.commit !== false,
 		browserEnabled: opts.browser === true ? "true" : opts.browser === false ? "false" : "auto",
+		supervisorEngine,
+		workerEngine,
+		maxReviewCycles: parseInt(opts.reviewCycles, 10) || 3,
+		approveThreshold,
+	};
 	};
 
 	return {

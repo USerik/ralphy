@@ -75,6 +75,52 @@ ralphy --qwen       # Qwen-Code
 ralphy --droid      # Factory Droid
 ```
 
+## Supervisor/Worker Mode
+
+Run tasks with a senior AI (supervisor) delegating to a junior AI (worker), with automatic code review.
+
+```bash
+# Basic supervisor mode
+ralphy --supervisor claude --worker opencode --prd PRD.md
+
+# Custom review settings
+ralphy --supervisor claude --worker cursor \
+  --review-cycles 5 \
+  --approve-threshold 0.9 \
+  --prd PRD.md
+```
+
+**How it works:**
+1. **Supervisor** analyzes the task and creates detailed implementation guidance
+2. **Worker** implements the task following the supervisor's instructions
+3. **Supervisor** reviews the code (checks git diff, code quality, tests, security)
+4. If not approved: supervisor provides feedback → worker iterates (up to N cycles)
+5. When approved or max cycles reached: commits the changes
+
+**Options:**
+- `--supervisor <engine>` - Senior AI for delegation and review
+- `--worker <engine>` - Junior AI for implementation
+- `--review-cycles <N>` - Max review iterations (default: 3)
+- `--approve-threshold <0-1>` - Approval score threshold (default: 0.8)
+
+**Engine combinations:**
+```bash
+ralphy --supervisor claude --worker opencode
+ralphy --supervisor claude --worker qwen
+ralphy --supervisor opencode --worker cursor
+ralphy --supervisor droid --worker codex
+```
+
+**Review scoring:**
+- `1.0` = Perfect, no issues
+- `0.9` = Excellent, minor cosmetic issues
+- `0.8` = Good, meets requirements
+- `0.7` = Acceptable, some concerns
+- `0.6` = Needs work, missing criteria
+- `<0.6` = Poor, major rework needed
+
+Tasks that don't reach approval threshold after max cycles are marked as "completed-with-warnings".
+
 ## Task Sources
 
 **Markdown** (default):
@@ -133,6 +179,10 @@ When enabled (and agent-browser is installed), the AI can:
 | `--yaml FILE` | YAML task file |
 | `--github REPO` | use GitHub issues |
 | `--github-label TAG` | filter issues by label |
+| `--supervisor ENGINE` | senior AI for supervisor mode |
+| `--worker ENGINE` | junior AI for supervisor mode |
+| `--review-cycles N` | max review cycles (default: 3) |
+| `--approve-threshold N` | approval threshold 0-1 (default: 0.8) |
 | `--parallel` | run parallel |
 | `--max-parallel N` | max agents (default: 3) |
 | `--branch-per-task` | branch per task |

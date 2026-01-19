@@ -6,6 +6,7 @@ export * from "./cursor.ts";
 export * from "./codex.ts";
 export * from "./qwen.ts";
 export * from "./droid.ts";
+export * from "./composite.ts";
 
 import type { AIEngine, AIEngineName } from "./types.ts";
 import { ClaudeEngine } from "./claude.ts";
@@ -17,8 +18,9 @@ import { DroidEngine } from "./droid.ts";
 
 /**
  * Create an AI engine by name
+ * Accepts any string to support flexible engine combinations in supervisor mode
  */
-export function createEngine(name: AIEngineName): AIEngine {
+export function createEngine(name: string): AIEngine {
 	switch (name) {
 		case "claude":
 			return new ClaudeEngine();
@@ -40,13 +42,13 @@ export function createEngine(name: AIEngineName): AIEngine {
 /**
  * Get the display name for an engine
  */
-export function getEngineName(name: AIEngineName): string {
+export function getEngineName(name: string): string {
 	return createEngine(name).name;
 }
 
 /**
  * Check if an engine is available
  */
-export async function isEngineAvailable(name: AIEngineName): Promise<boolean> {
+export async function isEngineAvailable(name: string): Promise<boolean> {
 	return createEngine(name).isAvailable();
 }

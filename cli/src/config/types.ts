@@ -82,9 +82,18 @@ export interface RuntimeOptions {
 	/** GitHub issue label filter */
 	githubLabel: string;
 	/** Auto-commit changes */
+	/** Auto-commit changes */
 	autoCommit: boolean;
 	/** Browser automation mode: 'auto' | 'true' | 'false' */
 	browserEnabled: "auto" | "true" | "false";
+	/** Supervisor engine (senior AI) */
+	supervisorEngine?: string;
+	/** Worker engine (junior AI) */
+	workerEngine?: string;
+	/** Maximum review cycles */
+	maxReviewCycles: number;
+	/** Approval threshold (0-1) */
+	approveThreshold: number;
 }
 
 /**
@@ -110,5 +119,11 @@ export const DEFAULT_OPTIONS: RuntimeOptions = {
 	githubRepo: "",
 	githubLabel: "",
 	autoCommit: true,
+	githubLabel: "",
+	autoCommit: true,
 	browserEnabled: "auto",
+	supervisorEngine: undefined,
+	workerEngine: undefined,
+	maxReviewCycles: 3,
+	approveThreshold: 0.8,
 };

@@ -1,10 +1,12 @@
 import { existsSync } from "node:fs";
 import type { AIEngineName } from "../../engines/types.ts";
 import { createEngine, isEngineAvailable } from "../../engines/index.ts";
+import { CompositeEngine } from "../../engines/composite.ts";
 import { createTaskSource } from "../../tasks/index.ts";
 import { runSequential } from "../../execution/sequential.ts";
 import { runParallel } from "../../execution/parallel.ts";
 import { isBrowserAvailable } from "../../execution/browser.ts";
+import { runSupervisor } from "../../execution/supervisor.ts";
 import { getDefaultBaseBranch } from "../../git/branch.ts";
 import { logError, logInfo, logSuccess, setVerbose, formatDuration, formatTokens } from "../../ui/logger.ts";
 import { notifyAllComplete } from "../../ui/notify.ts";
@@ -35,13 +37,46 @@ export async function runLoop(options: RuntimeOptions): Promise<void> {
 		process.exit(1);
 	}
 
-	// Check engine availability
-	const engine = createEngine(options.aiEngine as AIEngineName);
-	const available = await isEngineAvailable(options.aiEngine as AIEngineName);
+	// Detect supervisor mode
+	const isSupervisorMode = !!(options.supervisorEngine && options.workerEngine);
 
-	if (!available) {
-		logError(`${engine.name} CLI not found. Make sure '${engine.cliCommand}' is in your PATH.`);
-		process.exit(1);
+	// Check engine availability
+	let engine;
+	let compositeEngine;
+
+	if (isSupervisorMode) {
+		// Create and check both supervisor and worker engines
+		const supervisor = createEngine(options.supervisorEngine!);
+		const worker = createEngine(options.workerEngine!);
+
+		const supervisorAvailable = await supervisor.isAvailable();
+		const workerAvailable = await worker.isAvailable();
+
+		if (!supervisorAvailable) {
+			logError(`Supervisor ${supervisor.name} CLI not found. Make sure '${supervisor.cliCommand}' is in your PATH.`);
+			process.exit(1);
+		}
+
+		if (!workerAvailable) {
+			logError(`Worker ${worker.name} CLI not found. Make sure '${worker.cliCommand}' is in your PATH.`);
+			process.exit(1);
+		}
+
+		// Create composite engine
+		compositeEngine = new CompositeEngine(supervisor, worker, {
+			maxReviewCycles: options.maxReviewCycles,
+			approveThreshold: options.approveThreshold,
+		});
+
+		logInfo(`Supervisor Mode: ${supervisor.name} → ${worker.name}`);
+	} else {
+		engine = createEngine(options.aiEngine);
+		const available = await isEngineAvailable(options.aiEngine);
+
+		if (!available) {
+			logError(`${engine.name} CLI not found. Make sure '${engine.cliCommand}' is in your PATH.`);
+			process.exit(1);
+		}
 	}
 
 	// Create task source
@@ -65,9 +100,13 @@ export async function runLoop(options: RuntimeOptions): Promise<void> {
 		baseBranch = await getDefaultBaseBranch(workDir);
 	}
 
-	logInfo(`Starting Ralphy with ${engine.name}`);
+	if (!isSupervisorMode) {
+		logInfo(`Starting Ralphy with ${engine!.name}`);
+	}
 	logInfo(`Tasks remaining: ${remaining}`);
-	if (options.parallel) {
+	if (isSupervisorMode) {
+		logInfo(`Mode: Supervisor (max ${options.maxReviewCycles} review cycles, threshold ${options.approveThreshold})`);
+	} else if (options.parallel) {
 		logInfo(`Mode: Parallel (max ${options.maxParallel} agents)`);
 	} else {
 		logInfo("Mode: Sequential");
@@ -82,9 +121,26 @@ export async function runLoop(options: RuntimeOptions): Promise<void> {
 
 	// Run tasks
 	let result;
-	if (options.parallel) {
+	if (isSupervisorMode) {
+		result = await runSupervisor({
+			compositeEngine: compositeEngine!,
+			taskSource,
+			workDir,
+			skipTests: options.skipTests,
+			skipLint: options.skipLint,
+			dryRun: options.dryRun,
+			maxIterations: options.maxIterations,
+			maxRetries: options.maxRetries,
+			retryDelay: options.retryDelay,
+			branchPerTask: options.branchPerTask,
+			baseBranch,
+			createPr: options.createPr,
+			draftPr: options.draftPr,
+			autoCommit: options.autoCommit,
+		});
+	} else if (options.parallel) {
 		result = await runParallel({
-			engine,
+			engine: engine!,
 			taskSource,
 			workDir,
 			skipTests: options.skipTests,
@@ -106,7 +162,7 @@ export async function runLoop(options: RuntimeOptions): Promise<void> {
 		});
 	} else {
 		result = await runSequential({
-			engine,
+			engine: engine!,
 			taskSource,
 			workDir,
 			skipTests: options.skipTests,
@@ -131,6 +187,9 @@ export async function runLoop(options: RuntimeOptions): Promise<void> {
 	console.log("=".repeat(50));
 	logInfo("Summary:");
 	console.log(`  Completed: ${result.tasksCompleted}`);
+	if (isSupervisorMode && "tasksWithWarnings" in result && result.tasksWithWarnings > 0) {
+		console.log(`  Warnings:  ${result.tasksWithWarnings}`);
+	}
 	console.log(`  Failed:    ${result.tasksFailed}`);
 	console.log(`  Duration:  ${formatDuration(duration)}`);
 	if (result.totalInputTokens > 0 || result.totalOutputTokens > 0) {
