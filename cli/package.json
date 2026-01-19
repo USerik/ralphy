@@ -14,6 +14,8 @@
   ],
   "scripts": {
     "dev": "bun run src/index.ts",
+    "test": "bun test",
+    "test:watch": "bun test --watch",
     "build": "bun build src/index.ts --compile --minify --target=bun-darwin-arm64 --outfile dist/ralphy-darwin-arm64",
     "build:darwin-arm64": "bun build src/index.ts --compile --minify --target=bun-darwin-arm64 --outfile dist/ralphy-darwin-arm64",
     "build:darwin-x64": "bun build src/index.ts --compile --minify --target=bun-darwin-x64 --outfile dist/ralphy-darwin-x64",
