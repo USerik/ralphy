@@ -132,13 +132,11 @@ export function parseArgs(args: string[]): {
 		githubRepo: opts.github || "",
 		githubLabel: opts.githubLabel || "",
 		autoCommit: opts.commit !== false,
-		autoCommit: opts.commit !== false,
 		browserEnabled: opts.browser === true ? "true" : opts.browser === false ? "false" : "auto",
 		supervisorEngine,
 		workerEngine,
 		maxReviewCycles: parseInt(opts.reviewCycles, 10) || 3,
 		approveThreshold,
-	};
 	};
 
 	return {
