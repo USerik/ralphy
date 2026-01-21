@@ -74,9 +74,11 @@ export interface RuntimeOptions {
 	/** Maximum parallel agents */
 	maxParallel: number;
 	/** PRD source type */
-	prdSource: "markdown" | "yaml" | "github";
-	/** PRD file path */
+	prdSource: "markdown" | "markdown-folder" | "yaml" | "github";
+	/** PRD file or folder path */
 	prdFile: string;
+	/** Whether PRD path is a folder */
+	prdIsFolder: boolean;
 	/** GitHub repo (owner/repo) */
 	githubRepo: string;
 	/** GitHub issue label filter */
@@ -94,6 +96,10 @@ export interface RuntimeOptions {
 	maxReviewCycles: number;
 	/** Approval threshold (0-1) */
 	approveThreshold: number;
+	/** Override default model for the engine */
+	modelOverride?: string;
+	/** Skip automatic branch merging after parallel execution */
+	skipMerge?: boolean;
 }
 
 /**
@@ -116,9 +122,8 @@ export const DEFAULT_OPTIONS: RuntimeOptions = {
 	maxParallel: 3,
 	prdSource: "markdown",
 	prdFile: "PRD.md",
+	prdIsFolder: false,
 	githubRepo: "",
-	githubLabel: "",
-	autoCommit: true,
 	githubLabel: "",
 	autoCommit: true,
 	browserEnabled: "auto",
@@ -126,4 +131,6 @@ export const DEFAULT_OPTIONS: RuntimeOptions = {
 	workerEngine: undefined,
 	maxReviewCycles: 3,
 	approveThreshold: 0.8,
+	modelOverride: undefined,
+	skipMerge: undefined,
 };

@@ -12,7 +12,7 @@ set -euo pipefail
 # CONFIGURATION & DEFAULTS
 # ============================================
 
-VERSION="4.0.0"
+VERSION="4.3.0"
 
 # Ralphy config directory
 RALPHY_DIR=".ralphy"
@@ -28,6 +28,7 @@ AUTO_COMMIT=true
 SKIP_TESTS=false
 SKIP_LINT=false
 AI_ENGINE="claude"  # claude, opencode, cursor, codex, qwen, or droid
+MODEL_OVERRIDE=""   # Override default model for any engine (e.g., "sonnet", "gpt-4o-mini")
 DRY_RUN=false
 MAX_ITERATIONS=0  # 0 = unlimited
 MAX_RETRIES=3
@@ -620,11 +621,13 @@ run_brownfield_task() {
   case "$AI_ENGINE" in
     claude)
       claude --dangerously-skip-permissions \
+        ${MODEL_OVERRIDE:+--model "$MODEL_OVERRIDE"} \
         -p "$prompt" 2>&1 | tee "$output_file"
       ;;
     opencode)
       opencode --output-format stream-json \
         --approval-mode full-auto \
+        ${MODEL_OVERRIDE:+--model "$MODEL_OVERRIDE"} \
         "$prompt" 2>&1 | tee "$output_file"
       ;;
     cursor)
@@ -686,12 +689,16 @@ ${BOLD}SINGLE TASK MODE:${RESET}
   --no-commit         Don't auto-commit after task completion
 
 ${BOLD}AI ENGINE OPTIONS:${RESET}
-  --claude            Use Claude Code (default)
+  --claude            Use Claude Code (default, uses Opus)
   --opencode          Use OpenCode
   --cursor            Use Cursor agent
   --codex             Use Codex CLI
   --qwen              Use Qwen-Code
   --droid             Use Factory Droid
+  --model <name>      Override default model for any engine
+                      Claude: sonnet, haiku, opus
+                      OpenCode: gpt-4o, gpt-4o-mini, o1, o3-mini
+  --sonnet            Shortcut for --claude --model sonnet
 
 ${BOLD}WORKFLOW OPTIONS:${RESET}
   --no-tests          Skip writing and running tests
@@ -792,6 +799,11 @@ parse_args() {
         AI_ENGINE="claude"
         shift
         ;;
+      --sonnet)
+        AI_ENGINE="claude"
+        MODEL_OVERRIDE="sonnet"
+        shift
+        ;;
       --cursor|--agent)
         AI_ENGINE="cursor"
         shift
@@ -807,6 +819,10 @@ parse_args() {
       --droid)
         AI_ENGINE="droid"
         shift
+        ;;
+      --model)
+        MODEL_OVERRIDE="$2"
+        shift 2
         ;;
       --dry-run)
         DRY_RUN=true
@@ -1009,6 +1025,21 @@ check_requirements() {
       ;;
   esac
 
+  # Check for root user - Claude Code and some other AI engines don't support auto mode as root
+  if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+    case "$AI_ENGINE" in
+      claude|cursor)
+        log_error "Running as root is not supported with $AI_ENGINE."
+        log_info "The --dangerously-skip-permissions flag cannot be used as root for security reasons."
+        log_info "Please run Ralphy as a non-root user, or use a different AI engine (--opencode, --codex, --qwen, --droid)."
+        exit 1
+        ;;
+      *)
+        log_warn "Running as root user. Some AI engines may have limited functionality."
+        ;;
+    esac
+  fi
+
   # Check for jq (required for JSON parsing)
   if ! command -v jq &>/dev/null; then
     log_error "jq is required but not installed. On Linux, install with: apt-get install jq (Debian/Ubuntu) or yum install jq (RHEL/CentOS)"
@@ -1059,23 +1090,23 @@ check_requirements() {
 
 cleanup() {
   local exit_code=$?
-  
+
   # Kill background processes
   [[ -n "$monitor_pid" ]] && kill "$monitor_pid" 2>/dev/null || true
   [[ -n "$ai_pid" ]] && kill "$ai_pid" 2>/dev/null || true
-  
+
   # Kill parallel processes
   for pid in "${parallel_pids[@]+"${parallel_pids[@]}"}"; do
     kill "$pid" 2>/dev/null || true
   done
-  
+
   # Kill any remaining child processes
   pkill -P $$ 2>/dev/null || true
-  
+
   # Remove temp file
   [[ -n "$tmpfile" ]] && rm -f "$tmpfile"
   [[ -n "$CODEX_LAST_MESSAGE_FILE" ]] && rm -f "$CODEX_LAST_MESSAGE_FILE"
-  
+
   # Cleanup parallel worktrees
   if [[ -n "$WORKTREE_BASE" ]] && [[ -d "$WORKTREE_BASE" ]]; then
     # Remove all worktrees we created
@@ -1094,7 +1125,7 @@ cleanup() {
       log_warn "Preserving worktree base with dirty agents: $WORKTREE_BASE"
     fi
   fi
-  
+
   # Show message on interrupt
   if [[ $exit_code -eq 130 ]]; then
     printf "\n"
@@ -1282,9 +1313,9 @@ mark_task_complete() {
 create_task_branch() {
   local task=$1
   local branch_name="ralphy/$(slugify "$task")"
-  
+
   log_debug "Creating branch: $branch_name from $BASE_BRANCH"
-  
+
   # Stash any changes (only pop if a new stash was created)
   local stash_before stash_after stashed=false
   stash_before=$(git stash list -1 --format='%gd %s' 2>/dev/null || true)
@@ -1293,7 +1324,7 @@ create_task_branch() {
   if [[ -n "$stash_after" ]] && [[ "$stash_after" != "$stash_before" ]] && [[ "$stash_after" == *"ralphy-autostash"* ]]; then
     stashed=true
   fi
-  
+
   # Create and checkout new branch
   git checkout "$BASE_BRANCH" 2>/dev/null || true
   git pull origin "$BASE_BRANCH" 2>/dev/null || true
@@ -1301,12 +1332,12 @@ create_task_branch() {
     # Branch might already exist
     git checkout "$branch_name" 2>/dev/null || true
   }
-  
+
   # Pop stash if we stashed
   if [[ "$stashed" == true ]]; then
     git stash pop >/dev/null 2>&1 || true
   fi
-  
+
   task_branches+=("$branch_name")
   echo "$branch_name"
 }
@@ -1315,18 +1346,18 @@ create_pull_request() {
   local branch=$1
   local task=$2
   local body="${3:-Automated PR created by Ralphy}"
-  
+
   local draft_flag=""
   [[ "$PR_DRAFT" == true ]] && draft_flag="--draft"
-  
+
   log_info "Creating pull request for $branch..."
-  
+
   # Push branch first
   git push -u origin "$branch" 2>/dev/null || {
     log_warn "Failed to push branch $branch"
     return 1
   }
-  
+
   # Create PR
   local pr_url
   pr_url=$(gh pr create \
@@ -1338,7 +1369,7 @@ create_pull_request() {
     log_warn "Failed to create PR for $branch"
     return 1
   }
-  
+
   log_success "PR created: $pr_url"
   echo "$pr_url"
 }
@@ -1396,7 +1427,7 @@ monitor_progress() {
 
     local spinner_char="${spinstr:$spin_idx:1}"
     local step_color=""
-    
+
     # Color-code steps
     case "$current_step" in
       "Thinking"|"Reading code") step_color="$CYAN" ;;
@@ -1422,27 +1453,27 @@ monitor_progress() {
 
 notify_done() {
   local message="${1:-Ralphy has completed all tasks!}"
-  
+
   # macOS
   if command -v afplay &>/dev/null; then
     afplay /System/Library/Sounds/Glass.aiff 2>/dev/null &
   fi
-  
+
   # macOS notification
   if command -v osascript &>/dev/null; then
     osascript -e "display notification \"$message\" with title \"Ralphy\"" 2>/dev/null || true
   fi
-  
+
   # Linux (notify-send)
   if command -v notify-send &>/dev/null; then
     notify-send "Ralphy" "$message" 2>/dev/null || true
   fi
-  
+
   # Linux (paplay for sound)
   if command -v paplay &>/dev/null; then
     paplay /usr/share/sounds/freedesktop/stereo/complete.oga 2>/dev/null &
   fi
-  
+
   # Windows (powershell)
   if command -v powershell.exe &>/dev/null; then
     powershell.exe -Command "[System.Media.SystemSounds]::Asterisk.Play()" 2>/dev/null || true
@@ -1451,12 +1482,12 @@ notify_done() {
 
 notify_error() {
   local message="${1:-Ralphy encountered an error}"
-  
+
   # macOS
   if command -v osascript &>/dev/null; then
     osascript -e "display notification \"$message\" with title \"Ralphy - Error\"" 2>/dev/null || true
   fi
-  
+
   # Linux
   if command -v notify-send &>/dev/null; then
     notify-send -u critical "Ralphy - Error" "$message" 2>/dev/null || true
@@ -1535,12 +1566,12 @@ $issue_body
 @$PROGRESS_FILE"
       ;;
   esac
-  
+
   prompt="$prompt
 1. Find the highest-priority incomplete task and implement it."
 
   local step=2
-  
+
   if [[ "$SKIP_TESTS" == false ]]; then
     prompt="$prompt
 $step. Write tests for the feature.
@@ -1597,11 +1628,12 @@ If ALL tasks in the PRD are complete, output <promise>COMPLETE</promise>."
 run_ai_command() {
   local prompt=$1
   local output_file=$2
-  
+
   case "$AI_ENGINE" in
     opencode)
       # OpenCode: use 'run' command with JSON format and permissive settings
       OPENCODE_PERMISSION='{"*":"allow"}' opencode run \
+        ${MODEL_OVERRIDE:+--model "$MODEL_OVERRIDE"} \
         --format json \
         "$prompt" > "$output_file" 2>&1 &
       ;;
@@ -1634,12 +1666,13 @@ run_ai_command() {
     *)
       # Claude Code: use existing approach
       claude --dangerously-skip-permissions \
+        ${MODEL_OVERRIDE:+--model "$MODEL_OVERRIDE"} \
         --verbose \
         --output-format stream-json \
         -p "$prompt" > "$output_file" 2>&1 &
       ;;
   esac
-  
+
   ai_pid=$!
 }
 
@@ -1649,23 +1682,23 @@ parse_ai_result() {
   local input_tokens=0
   local output_tokens=0
   local actual_cost="0"
-  
+
   case "$AI_ENGINE" in
     opencode)
       # OpenCode JSON format: uses step_finish for tokens and text events for response
       local step_finish
       step_finish=$(echo "$result" | grep '"type":"step_finish"' | tail -1 || echo "")
-      
+
       if [[ -n "$step_finish" ]]; then
         input_tokens=$(echo "$step_finish" | jq -r '.part.tokens.input // 0' 2>/dev/null || echo "0")
         output_tokens=$(echo "$step_finish" | jq -r '.part.tokens.output // 0' 2>/dev/null || echo "0")
         # OpenCode provides actual cost directly
         actual_cost=$(echo "$step_finish" | jq -r '.part.cost // 0' 2>/dev/null || echo "0")
       fi
-      
+
       # Get text response from text events
       response=$(echo "$result" | grep '"type":"text"' | jq -rs 'map(.part.text // "") | join("")' 2>/dev/null || echo "")
-      
+
       # If no text found, indicate task completed
       if [[ -z "$response" ]]; then
         response="Task completed"
@@ -1674,10 +1707,10 @@ parse_ai_result() {
     cursor)
       # Cursor agent: parse stream-json output
       # Cursor doesn't provide token counts, but does provide duration_ms
-      
+
       local result_line
       result_line=$(echo "$result" | grep '"type":"result"' | tail -1)
-      
+
       if [[ -n "$result_line" ]]; then
         response=$(echo "$result_line" | jq -r '.result // "Task completed"' 2>/dev/null || echo "Task completed")
         # Cursor provides duration instead of tokens
@@ -1690,7 +1723,7 @@ parse_ai_result() {
           actual_cost="duration:$duration_ms"
         fi
       fi
-      
+
       # Get response from assistant message if result is empty
       if [[ -z "$response" ]] || [[ "$response" == "Task completed" ]]; then
         local assistant_msg
@@ -1699,7 +1732,7 @@ parse_ai_result() {
           response=$(echo "$assistant_msg" | jq -r '.message.content[0].text // .message.content // "Task completed"' 2>/dev/null || echo "Task completed")
         fi
       fi
-      
+
       # Tokens remain 0 for Cursor (not available)
       input_tokens=0
       output_tokens=0
@@ -1754,7 +1787,7 @@ parse_ai_result() {
       # Claude Code stream-json parsing
       local result_line
       result_line=$(echo "$result" | grep '"type":"result"' | tail -1)
-      
+
       if [[ -n "$result_line" ]]; then
         response=$(echo "$result_line" | jq -r '.result // "No result text"' 2>/dev/null || echo "Could not parse result")
         input_tokens=$(echo "$result_line" | jq -r '.usage.input_tokens // 0' 2>/dev/null || echo "0")
@@ -1762,11 +1795,11 @@ parse_ai_result() {
       fi
       ;;
   esac
-  
+
   # Sanitize token counts
   [[ "$input_tokens" =~ ^[0-9]+$ ]] || input_tokens=0
   [[ "$output_tokens" =~ ^[0-9]+$ ]] || output_tokens=0
-  
+
   echo "$response"
   echo "---TOKENS---"
   echo "$input_tokens"
@@ -1776,14 +1809,18 @@ parse_ai_result() {
 
 check_for_errors() {
   local result=$1
-  
+
   if echo "$result" | grep -q '"type":"error"'; then
     local error_msg
-    error_msg=$(echo "$result" | grep '"type":"error"' | head -1 | jq -r '.error.message // .message // .' 2>/dev/null || echo "Unknown error")
+    # Try different error message paths used by various AI engines:
+    # - OpenCode: .error.data.message
+    # - Claude/Qwen: .error.message
+    # - Generic: .message
+    error_msg=$(echo "$result" | grep '"type":"error"' | head -1 | jq -r '.error.data.message // .error.message // .message // "Unknown error"' 2>/dev/null || echo "Unknown error")
     echo "$error_msg"
     return 1
   fi
-  
+
   return 0
 }
 
@@ -1794,7 +1831,7 @@ check_for_errors() {
 calculate_cost() {
   local input=$1
   local output=$2
-  
+
   if command -v bc &>/dev/null; then
     echo "scale=4; ($input * 0.000003) + ($output * 0.000015)" | bc
   else
@@ -1809,12 +1846,12 @@ calculate_cost() {
 run_single_task() {
   local task_name="${1:-}"
   local task_num="${2:-$iteration}"
-  
+
   retry_count=0
-  
+
   echo ""
   echo "${BOLD}>>> Task $task_num${RESET}"
-  
+
   local remaining completed
   remaining=$(count_remaining_tasks | tr -d '[:space:]')
   completed=$(count_completed_tasks | tr -d '[:space:]')
@@ -1830,12 +1867,12 @@ run_single_task() {
   else
     current_task=$(get_next_task)
   fi
-  
+
   if [[ -z "$current_task" ]]; then
     log_info "No more tasks found"
     return 2
   fi
-  
+
   current_step="Thinking"
 
   # Create branch if needed
@@ -1932,7 +1969,7 @@ run_single_task() {
     actual_cost=$(echo "$token_data" | sed -n '3p')
 
     printf "  ${GREEN}✓${RESET} %-16s │ %s\n" "Done" "${current_task:0:40}"
-    
+
     if [[ -n "$response" ]]; then
       echo ""
       echo "$response"
@@ -1945,7 +1982,7 @@ run_single_task() {
     # Update totals
     total_input_tokens=$((total_input_tokens + input_tokens))
     total_output_tokens=$((total_output_tokens + output_tokens))
-    
+
     # Track actual cost for OpenCode, or duration for Cursor
     if [[ -n "$actual_cost" ]]; then
       if [[ "$actual_cost" == duration:* ]]; then
@@ -1983,11 +2020,11 @@ run_single_task() {
     remaining_count=$(count_remaining_tasks | tr -d '[:space:]' | head -1)
     remaining_count=${remaining_count:-0}
     [[ "$remaining_count" =~ ^[0-9]+$ ]] || remaining_count=0
-    
+
     if [[ "$remaining_count" -eq 0 ]]; then
       return 2  # All tasks actually complete
     fi
-    
+
     # AI might claim completion but tasks remain - continue anyway
     if [[ "$result" == *"<promise>COMPLETE</promise>"* ]]; then
       log_debug "AI claimed completion but $remaining_count tasks remain, continuing..."
@@ -2010,28 +2047,28 @@ create_agent_worktree() {
   local agent_num="$2"
   local branch_name="ralphy/agent-${agent_num}-$(slugify "$task_name")"
   local worktree_dir="${WORKTREE_BASE}/agent-${agent_num}"
-  
+
   # Run git commands from original directory
   # All git output goes to stderr so it doesn't interfere with our return value
   (
     cd "$ORIGINAL_DIR" || { echo "Failed to cd to $ORIGINAL_DIR" >&2; exit 1; }
-    
+
     # Prune any stale worktrees first
     git worktree prune >&2
-    
+
     # Delete branch if it exists (force)
     git branch -D "$branch_name" >&2 2>/dev/null || true
-    
+
     # Create branch from base
     git branch "$branch_name" "$BASE_BRANCH" >&2 || { echo "Failed to create branch $branch_name from $BASE_BRANCH" >&2; exit 1; }
-    
+
     # Remove existing worktree dir if any
     rm -rf "$worktree_dir" 2>/dev/null || true
-    
+
     # Create worktree
     git worktree add "$worktree_dir" "$branch_name" >&2 || { echo "Failed to create worktree at $worktree_dir" >&2; exit 1; }
   )
-  
+
   # Only output the result - git commands above send their output to stderr
   echo "$worktree_dir|$branch_name"
 }
@@ -2055,7 +2092,7 @@ cleanup_agent_worktree() {
     fi
     return 0
   fi
-  
+
   # Run from original directory
   (
     cd "$ORIGINAL_DIR" || exit 1
@@ -2071,38 +2108,38 @@ run_parallel_agent() {
   local output_file="$3"
   local status_file="$4"
   local log_file="$5"
-  
+
   echo "setting up" > "$status_file"
-  
+
   # Log setup info
   echo "Agent $agent_num starting for task: $task_name" >> "$log_file"
   echo "ORIGINAL_DIR=$ORIGINAL_DIR" >> "$log_file"
   echo "WORKTREE_BASE=$WORKTREE_BASE" >> "$log_file"
   echo "BASE_BRANCH=$BASE_BRANCH" >> "$log_file"
-  
+
   # Create isolated worktree for this agent
   local worktree_info
   worktree_info=$(create_agent_worktree "$task_name" "$agent_num" 2>>"$log_file")
   local worktree_dir="${worktree_info%%|*}"
   local branch_name="${worktree_info##*|}"
-  
+
   echo "Worktree dir: $worktree_dir" >> "$log_file"
   echo "Branch name: $branch_name" >> "$log_file"
-  
+
   if [[ ! -d "$worktree_dir" ]]; then
     echo "failed" > "$status_file"
     echo "ERROR: Worktree directory does not exist: $worktree_dir" >> "$log_file"
     echo "0 0" > "$output_file"
     return 1
   fi
-  
+
   echo "running" > "$status_file"
-  
+
   # Copy PRD file to worktree from original directory
   if [[ "$PRD_SOURCE" == "markdown" ]] || [[ "$PRD_SOURCE" == "yaml" ]]; then
     cp "$ORIGINAL_DIR/$PRD_FILE" "$worktree_dir/" 2>/dev/null || true
   fi
-  
+
   # Ensure .ralphy/ and progress.txt exist in worktree
   mkdir -p "$worktree_dir/$RALPHY_DIR"
   touch "$worktree_dir/$PROGRESS_FILE"
@@ -2124,18 +2161,19 @@ Focus only on implementing: $task_name"
   # Temp file for AI output
   local tmpfile
   tmpfile=$(mktemp)
-  
+
   # Run AI agent in the worktree directory
   local result=""
   local success=false
   local retry=0
-  
+
   while [[ $retry -lt $MAX_RETRIES ]]; do
     case "$AI_ENGINE" in
       opencode)
         (
           cd "$worktree_dir"
           OPENCODE_PERMISSION='{"*":"allow"}' opencode run \
+            ${MODEL_OVERRIDE:+--model "$MODEL_OVERRIDE"} \
             --format json \
             "$prompt"
         ) > "$tmpfile" 2>>"$log_file"
@@ -2179,15 +2217,16 @@ Focus only on implementing: $task_name"
         (
           cd "$worktree_dir"
           claude --dangerously-skip-permissions \
+            ${MODEL_OVERRIDE:+--model "$MODEL_OVERRIDE"} \
             --verbose \
             -p "$prompt" \
             --output-format stream-json
         ) > "$tmpfile" 2>>"$log_file"
         ;;
     esac
-    
+
     result=$(cat "$tmpfile" 2>/dev/null || echo "")
-    
+
     if [[ -n "$result" ]]; then
       local error_msg
       if ! error_msg=$(check_for_errors "$result"); then
@@ -2199,14 +2238,14 @@ Focus only on implementing: $task_name"
       success=true
       break
     fi
-    
+
     ((retry++)) || true
     echo "Retry $retry/$MAX_RETRIES after empty response" >> "$log_file"
     sleep "$RETRY_DELAY"
   done
-  
+
   rm -f "$tmpfile"
-  
+
   if [[ "$success" == true ]]; then
     # Parse tokens
     local parsed input_tokens output_tokens
@@ -2231,7 +2270,7 @@ Focus only on implementing: $task_name"
       cleanup_agent_worktree "$worktree_dir" "$branch_name" "$log_file"
       return 1
     fi
-    
+
     # Create PR if requested
     if [[ "$CREATE_PR" == true ]]; then
       (
@@ -2245,14 +2284,14 @@ Focus only on implementing: $task_name"
           ${PR_DRAFT:+--draft} 2>>"$log_file" || true
       )
     fi
-    
+
     # Write success output
     echo "done" > "$status_file"
     echo "$input_tokens $output_tokens $branch_name" > "$output_file"
-    
+
     # Cleanup worktree (but keep branch)
     cleanup_agent_worktree "$worktree_dir" "$branch_name" "$log_file"
-    
+
     return 0
   else
     echo "failed" > "$status_file"
@@ -2264,31 +2303,31 @@ Focus only on implementing: $task_name"
 
 run_parallel_tasks() {
   log_info "Running ${BOLD}$MAX_PARALLEL parallel agents${RESET} (each in isolated worktree)..."
-  
+
   local all_tasks=()
-  
+
   # Get all pending tasks
   while IFS= read -r task; do
     [[ -n "$task" ]] && all_tasks+=("$task")
   done < <(get_all_tasks)
-  
+
   if [[ ${#all_tasks[@]} -eq 0 ]]; then
     log_info "No tasks to run"
     return 2
   fi
-  
+
   local total_tasks=${#all_tasks[@]}
   log_info "Found $total_tasks tasks to process"
-  
+
   # Store original directory for git operations from subshells
   ORIGINAL_DIR=$(pwd)
   export ORIGINAL_DIR
-  
+
   # Set up worktree base directory
   WORKTREE_BASE=$(mktemp -d)
   export WORKTREE_BASE
   log_debug "Worktree base: $WORKTREE_BASE"
-  
+
   # Ensure we have a base branch set
   if [[ -z "$BASE_BRANCH" ]]; then
     BASE_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
@@ -2583,14 +2622,14 @@ run_parallel_tasks() {
       break
     fi
   done
-  
+
   # Cleanup worktree base
   if ! find "$WORKTREE_BASE" -maxdepth 1 -type d -name 'agent-*' -print -quit 2>/dev/null | grep -q .; then
     rm -rf "$WORKTREE_BASE" 2>/dev/null || true
   else
     log_warn "Preserving worktree base with dirty agents: $WORKTREE_BASE"
   fi
-  
+
   # Handle completed branches
   if [[ ${#completed_branches[@]} -gt 0 ]]; then
     echo ""
@@ -2663,10 +2702,10 @@ run_parallel_tasks() {
       fi
 
       local merge_failed=()
-      
+
       for branch in "${completed_branches[@]}"; do
         printf "  Merging ${CYAN}%s${RESET}..." "$branch"
-        
+
         # Attempt to merge
         if git merge --no-edit "$branch" >/dev/null 2>&1; then
           printf " ${GREEN}✓${RESET}\n"
@@ -2678,22 +2717,22 @@ run_parallel_tasks() {
           # Don't abort yet - try AI resolution
         fi
       done
-      
+
       # Use AI to resolve merge conflicts
       if [[ ${#merge_failed[@]} -gt 0 ]]; then
         echo ""
         echo "${BOLD}Using AI to resolve ${#merge_failed[@]} merge conflict(s)...${RESET}"
         echo ""
-        
+
         local still_failed=()
-        
+
         for branch in "${merge_failed[@]}"; do
           printf "  Resolving ${CYAN}%s${RESET}..." "$branch"
-          
+
           # Get list of conflicted files
           local conflicted_files
           conflicted_files=$(git diff --name-only --diff-filter=U 2>/dev/null)
-          
+
           if [[ -z "$conflicted_files" ]]; then
             # No conflicts found (maybe already resolved or aborted)
             git merge --abort 2>/dev/null || true
@@ -2707,7 +2746,7 @@ run_parallel_tasks() {
             git branch -d "$branch" >/dev/null 2>&1 || true
             continue
           fi
-          
+
           # Build prompt for AI to resolve conflicts
           local resolve_prompt="You are resolving a git merge conflict. The following files have conflicts:
 
@@ -2729,10 +2768,11 @@ Be careful to preserve functionality from BOTH branches. The goal is to integrat
           # Run AI to resolve conflicts
           local resolve_tmpfile
           resolve_tmpfile=$(mktemp)
-          
+
           case "$AI_ENGINE" in
             opencode)
               OPENCODE_PERMISSION='{"*":"allow"}' opencode run \
+                ${MODEL_OVERRIDE:+--model "$MODEL_OVERRIDE"} \
                 --format json \
                 "$resolve_prompt" > "$resolve_tmpfile" 2>&1
               ;;
@@ -2758,13 +2798,14 @@ Be careful to preserve functionality from BOTH branches. The goal is to integrat
               ;;
             *)
               claude --dangerously-skip-permissions \
+                ${MODEL_OVERRIDE:+--model "$MODEL_OVERRIDE"} \
                 -p "$resolve_prompt" \
                 --output-format stream-json > "$resolve_tmpfile" 2>&1
               ;;
           esac
-          
+
           rm -f "$resolve_tmpfile"
-          
+
           # Check if merge was completed
           if ! git diff --name-only --diff-filter=U 2>/dev/null | grep -q .; then
             # No more conflicts - merge succeeded
@@ -2777,7 +2818,7 @@ Be careful to preserve functionality from BOTH branches. The goal is to integrat
             git merge --abort 2>/dev/null || true
           fi
         done
-        
+
         if [[ ${#still_failed[@]} -gt 0 ]]; then
           echo ""
           echo "${YELLOW}Some conflicts could not be resolved automatically:${RESET}"
@@ -2796,7 +2837,7 @@ Be careful to preserve functionality from BOTH branches. The goal is to integrat
       fi
     fi
   fi
-  
+
   return 0
 }
 
@@ -2811,7 +2852,7 @@ show_summary() {
   echo "${BOLD}============================================${RESET}"
   echo ""
   echo "${BOLD}>>> Cost Summary${RESET}"
-  
+
   # Cursor and Droid don't provide token usage, but do provide duration
   if [[ "$AI_ENGINE" == "cursor" ]] || [[ "$AI_ENGINE" == "droid" ]]; then
     echo "${DIM}Token usage not available (CLI doesn't expose this data)${RESET}"
@@ -2829,7 +2870,7 @@ show_summary() {
     echo "Input tokens:  $total_input_tokens"
     echo "Output tokens: $total_output_tokens"
     echo "Total tokens:  $((total_input_tokens + total_output_tokens))"
-    
+
     # Show actual cost if available (OpenCode provides this), otherwise estimate
     if [[ "$AI_ENGINE" == "opencode" ]] && command -v bc &>/dev/null; then
       local has_actual_cost
@@ -2847,7 +2888,7 @@ show_summary() {
       echo "Est. cost:     \$$cost"
     fi
   fi
-  
+
   # Show branches if created
   if [[ -n "${task_branches[*]+"${task_branches[*]}"}" ]]; then
     echo ""
@@ -2856,7 +2897,7 @@ show_summary() {
       echo "  - $branch"
     done
   fi
-  
+
   echo "${BOLD}============================================${RESET}"
 }
 
@@ -2972,7 +3013,7 @@ main() {
   [[ "$BRANCH_PER_TASK" == true ]] && mode_parts+=("branch-per-task")
   [[ "$CREATE_PR" == true ]] && mode_parts+=("create-pr")
   [[ $MAX_ITERATIONS -gt 0 ]] && mode_parts+=("max:$MAX_ITERATIONS")
-  
+
   if [[ ${#mode_parts[@]} -gt 0 ]]; then
     echo "Mode: ${YELLOW}${mode_parts[*]}${RESET}"
   fi
@@ -2991,7 +3032,7 @@ main() {
     ((iteration++)) || true
     local result_code=0
     run_single_task "" "$iteration" || result_code=$?
-    
+
     case $result_code in
       0)
         # Success, continue
@@ -3007,7 +3048,7 @@ main() {
         exit 0
         ;;
     esac
-    
+
     # Check max iterations
     if [[ $MAX_ITERATIONS -gt 0 ]] && [[ $iteration -ge $MAX_ITERATIONS ]]; then
       log_warn "Reached max iterations ($MAX_ITERATIONS)"
@@ -3015,7 +3056,7 @@ main() {
       notify_done "Ralphy stopped after $MAX_ITERATIONS iterations"
       exit 0
     fi
-    
+
     # Small delay between iterations
     sleep 1
   done

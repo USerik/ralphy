@@ -60,7 +60,10 @@ function escapeYaml(value: string): string {
 /**
  * Initialize the .ralphy directory with config files
  */
-export function initConfig(workDir = process.cwd()): { created: boolean; detected: ReturnType<typeof detectProject> } {
+export function initConfig(workDir = process.cwd()): {
+	created: boolean;
+	detected: ReturnType<typeof detectProject>;
+} {
 	const ralphyDir = getRalphyDir(workDir);
 	const configPath = getConfigPath(workDir);
 	const progressPath = getProgressPath(workDir);
@@ -114,7 +117,7 @@ export function addRule(rule: string, workDir = process.cwd()): void {
 export function logTaskProgress(
 	task: string,
 	status: "completed" | "failed",
-	workDir = process.cwd()
+	workDir = process.cwd(),
 ): void {
 	const progressPath = getProgressPath(workDir);
 

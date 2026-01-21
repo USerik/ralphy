@@ -75,6 +75,7 @@ ralphy --qwen       # Qwen-Code
 ralphy --droid      # Factory Droid
 ```
 
+<<<<<<< HEAD
 ## Supervisor/Worker Mode
 
 Run tasks with a senior AI (supervisor) delegating to a junior AI (worker), with automatic code review.
@@ -121,12 +122,25 @@ ralphy --supervisor droid --worker codex
 
 Tasks that don't reach approval threshold after max cycles are marked as "completed-with-warnings".
 
+### Model Override
+
+```bash
+ralphy --model sonnet "add feature"    # use sonnet with Claude
+ralphy --sonnet "add feature"          # shortcut for above
+ralphy --opencode --model opencode/glm-4.7-free "task"
+```
 ## Task Sources
 
-**Markdown** (default):
+**Markdown file** (default):
 ```bash
 ralphy --prd PRD.md
 ```
+
+**Markdown folder** (for large projects):
+```bash
+ralphy --prd ./prd/
+```
+Reads all `.md` files in the folder and aggregates tasks.
 
 **YAML**:
 ```bash
@@ -146,7 +160,7 @@ ralphy --parallel                  # 3 agents default
 ralphy --parallel --max-parallel 5 # 5 agents
 ```
 
-Each agent gets isolated worktree + branch. Without `--create-pr`: auto-merges back. With `--create-pr`: keeps branches, creates PRs.
+Each agent gets isolated worktree + branch. Without `--create-pr`: auto-merges back with AI conflict resolution. With `--create-pr`: keeps branches, creates PRs. With `--no-merge`: keeps branches without merging.
 
 ## Branch Workflow
 
@@ -175,16 +189,22 @@ When enabled (and agent-browser is installed), the AI can:
 
 | Flag | What it does |
 |------|--------------|
-| `--prd FILE` | task file (default: PRD.md) |
+| `--prd PATH` | task file or folder (auto-detected, default: PRD.md) |
 | `--yaml FILE` | YAML task file |
 | `--github REPO` | use GitHub issues |
 | `--github-label TAG` | filter issues by label |
+<<<<<<< HEAD
 | `--supervisor ENGINE` | senior AI for supervisor mode |
 | `--worker ENGINE` | junior AI for supervisor mode |
 | `--review-cycles N` | max review cycles (default: 3) |
 | `--approve-threshold N` | approval threshold 0-1 (default: 0.8) |
+=======
+| `--model NAME` | override model for any engine |
+| `--sonnet` | shortcut for `--claude --model sonnet` |
+>>>>>>> origin/main
 | `--parallel` | run parallel |
 | `--max-parallel N` | max agents (default: 3) |
+| `--no-merge` | skip auto-merge in parallel mode |
 | `--branch-per-task` | branch per task |
 | `--base-branch BRANCH` | base branch for PRs |
 | `--create-pr` | create PRs |

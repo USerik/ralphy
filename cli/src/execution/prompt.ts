@@ -14,7 +14,14 @@ interface PromptOptions {
  * Build the full prompt with project context, rules, boundaries, and task
  */
 export function buildPrompt(options: PromptOptions): string {
-	const { task, autoCommit = true, workDir = process.cwd(), browserEnabled = "auto", skipTests = false, skipLint = false } = options;
+	const {
+		task,
+		autoCommit = true,
+		workDir = process.cwd(),
+		browserEnabled = "auto",
+		skipTests = false,
+		skipLint = false,
+	} = options;
 
 	const parts: string[] = [];
 
@@ -87,9 +94,17 @@ interface ParallelPromptOptions {
  * Build a prompt for parallel agent execution
  */
 export function buildParallelPrompt(options: ParallelPromptOptions): string {
-	const { task, progressFile, skipTests = false, skipLint = false, browserEnabled = "auto" } = options;
+	const {
+		task,
+		progressFile,
+		skipTests = false,
+		skipLint = false,
+		browserEnabled = "auto",
+	} = options;
 
-	const browserSection = isBrowserAvailable(browserEnabled) ? `\n\n${getBrowserInstructions()}` : "";
+	const browserSection = isBrowserAvailable(browserEnabled)
+		? `\n\n${getBrowserInstructions()}`
+		: "";
 
 	const instructions = ["1. Implement this specific task completely"];
 
