@@ -16,7 +16,8 @@ export class MarkdownTaskSource implements TaskSource {
 	async getAllTasks(): Promise<Task[]> {
 		const content = readFileSync(this.filePath, "utf-8");
 		const tasks: Task[] = [];
-		const lines = content.split("\n");
+		// Normalize line endings (CRLF -> LF) for Windows compatibility
+		const lines = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
 
 		for (let i = 0; i < lines.length; i++) {
 			const line = lines[i];
@@ -42,25 +43,33 @@ export class MarkdownTaskSource implements TaskSource {
 
 	async markComplete(id: string): Promise<void> {
 		const content = readFileSync(this.filePath, "utf-8");
-		const lines = content.split("\n");
+		// Detect original line ending style
+		const lineEnding = content.includes("\r\n") ? "\r\n" : "\n";
+		// Normalize for processing
+		const lines = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
 		const lineNumber = Number.parseInt(id, 10) - 1;
 
 		if (lineNumber >= 0 && lineNumber < lines.length) {
 			// Replace "- [ ]" with "- [x]"
 			lines[lineNumber] = lines[lineNumber].replace(/^- \[ \] /, "- [x] ");
-			writeFileSync(this.filePath, lines.join("\n"), "utf-8");
+			// Write back with original line ending style
+			writeFileSync(this.filePath, lines.join(lineEnding), "utf-8");
 		}
 	}
 
 	async countRemaining(): Promise<number> {
 		const content = readFileSync(this.filePath, "utf-8");
-		const matches = content.match(/^- \[ \] /gm);
+		// Normalize line endings for consistent matching
+		const normalized = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+		const matches = normalized.match(/^- \[ \] /gm);
 		return matches?.length || 0;
 	}
 
 	async countCompleted(): Promise<number> {
 		const content = readFileSync(this.filePath, "utf-8");
-		const matches = content.match(/^- \[x\] /gim);
+		// Normalize line endings for consistent matching
+		const normalized = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+		const matches = normalized.match(/^- \[x\] /gim);
 		return matches?.length || 0;
 	}
 }

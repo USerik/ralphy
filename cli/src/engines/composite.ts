@@ -113,7 +113,8 @@ export class CompositeEngine implements AIEngine {
 		logDebug(`[Supervisor] Delegating task...`);
 
 		try {
-			const result = await this.supervisor.execute(task, workDir);
+			// Disable tools for supervisor to get JSON response instead of executing actions
+			const result = await this.supervisor.execute(task, workDir, { disableTools: true });
 
 			if (!result.success) {
 				return {
@@ -213,7 +214,8 @@ export class CompositeEngine implements AIEngine {
 		logDebug(`[Supervisor] Reviewing implementation (cycle ${cycle})...`);
 
 		try {
-			const result = await this.supervisor.execute(originalTask, workDir);
+			// Disable tools for supervisor to get JSON response instead of executing actions
+			const result = await this.supervisor.execute(originalTask, workDir, { disableTools: true });
 
 			if (!result.success) {
 				return {

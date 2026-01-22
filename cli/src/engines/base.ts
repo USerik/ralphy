@@ -6,22 +6,6 @@ const isBun = typeof Bun !== "undefined";
 const isWindows = process.platform === "win32";
 
 /**
- * Resolve a command to its full executable path (needed for Windows)
- */
-function resolveCommand(command: string): string {
-	if (!isWindows || isBun) return command;
-	try {
-		const result = spawnSync("where", [command], { encoding: "utf8", stdio: "pipe" });
-		if (result.status !== 0) return command;
-		const paths = result.stdout.trim().split(/\r?\n/);
-		// Return first path (the one that would be executed)
-		return paths[0] || command;
-	} catch {
-		return command;
-	}
-}
-
-/**
  * Check if a command is available in PATH
  */
 export async function commandExists(command: string): Promise<boolean> {
@@ -51,10 +35,12 @@ export async function execCommand(
 	args: string[],
 	workDir: string,
 	env?: Record<string, string>,
+	stdin?: string,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
 	if (isBun) {
 		const proc = Bun.spawn([command, ...args], {
 			cwd: workDir,
+			stdin: stdin ? new TextEncoder().encode(stdin) : undefined,
 			stdout: "pipe",
 			stderr: "pipe",
 			env: { ...process.env, ...env },
@@ -69,14 +55,21 @@ export async function execCommand(
 		return { stdout, stderr, exitCode };
 	}
 
-	// Node.js fallback - resolve full path on Windows to avoid shell
-	const resolvedCommand = resolveCommand(command);
+	// Node.js fallback - use shell on Windows for .cmd/.bat support
 	return new Promise((resolve) => {
-		const proc = spawn(resolvedCommand, args, {
+		const proc = spawn(command, args, {
 			cwd: workDir,
 			env: { ...process.env, ...env },
-			stdio: ["ignore", "pipe", "pipe"], // Close stdin, pipe stdout/stderr
+			stdio: [stdin ? "pipe" : "ignore", "pipe", "pipe"],
+			shell: isWindows, // Required on Windows for npm-installed CLI tools
 		});
+
+		// Write stdin if provided - use callback to ensure data is flushed
+		if (stdin && proc.stdin) {
+			proc.stdin.write(stdin, "utf8", () => {
+				proc.stdin?.end();
+			});
+		}
 
 		let stdout = "";
 		let stderr = "";
@@ -97,6 +90,47 @@ export async function execCommand(
 			resolve({ stdout, stderr, exitCode: 1 });
 		});
 	});
+}
+
+/**
+ * Execute a command with large input via shell pipe (Windows compatible)
+ * Uses: type tempfile | command args
+ */
+export async function execCommandWithShellPipe(
+	inputContent: string,
+	command: string,
+	args: string[],
+	workDir: string,
+	env?: Record<string, string>,
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+	const { writeFileSync: writeSync, unlinkSync: deleteSync } = await import("node:fs");
+	const { join: joinPath } = await import("node:path");
+	const { tmpdir: getTmpDir } = await import("node:os");
+
+	// Write input to temp file
+	const tempFile = joinPath(getTmpDir(), `ralphy-pipe-${Date.now()}.txt`);
+	writeSync(tempFile, inputContent, "utf8");
+
+	try {
+		// Build shell command: type file | command args
+		const escapedArgs = args.map(arg => arg.includes(" ") ? `"${arg}"` : arg).join(" ");
+		const shellCommand = isWindows
+			? `type "${tempFile}" | ${command} ${escapedArgs}`
+			: `cat "${tempFile}" | ${command} ${escapedArgs}`;
+
+		// Execute via shell
+		const result = await execCommand(
+			isWindows ? "cmd" : "sh",
+			isWindows ? ["/c", shellCommand] : ["-c", shellCommand],
+			workDir,
+			env,
+		);
+
+		return result;
+	} finally {
+		// Clean up temp file
+		try { deleteSync(tempFile); } catch { /* ignore */ }
+	}
 }
 
 /**
@@ -200,13 +234,13 @@ export async function execCommandStreaming(
 		return { exitCode };
 	}
 
-	// Node.js fallback - resolve full path on Windows to avoid shell
-	const resolvedCommand = resolveCommand(command);
+	// Node.js fallback - use shell on Windows for .cmd/.bat support
 	return new Promise((resolve) => {
-		const proc = spawn(resolvedCommand, args, {
+		const proc = spawn(command, args, {
 			cwd: workDir,
 			env: { ...process.env, ...env },
 			stdio: ["ignore", "pipe", "pipe"], // Close stdin, pipe stdout/stderr
+			shell: isWindows, // Required on Windows for npm-installed CLI tools
 		});
 
 		let stdoutBuffer = "";

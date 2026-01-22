@@ -17,6 +17,8 @@ export interface AIResult {
 export interface EngineOptions {
 	/** Override the default model */
 	modelOverride?: string;
+	/** Disable all tools (for supervisor mode - delegation/review only) */
+	disableTools?: boolean;
 }
 
 /**

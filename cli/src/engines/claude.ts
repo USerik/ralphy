@@ -1,9 +1,13 @@
+import { writeFileSync, unlinkSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import {
 	BaseAIEngine,
 	checkForErrors,
 	detectStepFromOutput,
 	execCommand,
 	execCommandStreaming,
+	execCommandWithShellPipe,
 	parseStreamJsonResult,
 } from "./base.ts";
 import type { AIResult, EngineOptions, ProgressCallback } from "./types.ts";
@@ -20,9 +24,22 @@ export class ClaudeEngine extends BaseAIEngine {
 		if (options?.modelOverride) {
 			args.push("--model", options.modelOverride);
 		}
-		args.push("-p", prompt);
 
-		const { stdout, stderr, exitCode } = await execCommand(this.cliCommand, args, workDir);
+		let result: { stdout: string; stderr: string; exitCode: number };
+
+		// For supervisor mode with disableTools, use shell pipe for large prompts
+		if (options?.disableTools) {
+			args.push("--tools=");
+			args.push("--disable-slash-commands");
+			args.push("--system-prompt", "You are a JSON-only response bot. Output ONLY valid JSON. No text, no markdown, no code blocks. Start with { and end with }.");
+			// Use shell pipe (type file | command) for reliable stdin on Windows
+			result = await execCommandWithShellPipe(prompt, this.cliCommand, args, workDir);
+		} else {
+			args.push("-p", prompt);
+			result = await execCommand(this.cliCommand, args, workDir);
+		}
+
+		const { stdout, stderr, exitCode } = result;
 
 		const output = stdout + stderr;
 
@@ -58,6 +75,14 @@ export class ClaudeEngine extends BaseAIEngine {
 		const args = ["--dangerously-skip-permissions", "--verbose", "--output-format", "stream-json"];
 		if (options?.modelOverride) {
 			args.push("--model", options.modelOverride);
+		}
+		// Disable tools for supervisor mode (delegation/review) to get JSON response
+		// Use '--tools=' (combined arg) for Windows shell compatibility
+		if (options?.disableTools) {
+			args.push("--tools=");
+			args.push("--disable-slash-commands");
+			// Override system prompt to enforce JSON-only output
+			args.push("--system-prompt", "You are a JSON-only response bot. You MUST output ONLY valid JSON. No text, no greetings, no explanations. Start with { and end with }. The user message contains instructions on what JSON structure to output.");
 		}
 		args.push("-p", prompt);
 

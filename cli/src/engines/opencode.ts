@@ -1,3 +1,6 @@
+import { writeFileSync, unlinkSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { BaseAIEngine, checkForErrors, execCommand } from "./base.ts";
 import type { AIResult, EngineOptions } from "./types.ts";
 
@@ -13,12 +16,23 @@ export class OpenCodeEngine extends BaseAIEngine {
 		if (options?.modelOverride) {
 			args.push("--model", options.modelOverride);
 		}
-		args.push(prompt);
 
-		const { stdout, stderr, exitCode } = await execCommand(this.cliCommand, args, workDir, {
-			OPENCODE_PERMISSION: '{"*":"allow"}',
-		});
+		// Write prompt to temp file to avoid shell escaping issues on Windows
+		const promptFile = join(tmpdir(), `ralphy-opencode-${Date.now()}.txt`);
+		writeFileSync(promptFile, prompt, "utf8");
+		// Message must come BEFORE -f flag, and use simple message without special characters
+		args.push("Execute task from attached file", "-f", promptFile);
 
+		let result: { stdout: string; stderr: string; exitCode: number };
+		try {
+			result = await execCommand(this.cliCommand, args, workDir, {
+				OPENCODE_PERMISSION: '{"*":"allow"}',
+			});
+		} finally {
+			// Clean up temp file
+			try { unlinkSync(promptFile); } catch { /* ignore */ }
+		}
+		const { stdout, stderr, exitCode } = result;
 		const output = stdout + stderr;
 
 		// Check for errors
@@ -36,8 +50,11 @@ export class OpenCodeEngine extends BaseAIEngine {
 		// Parse OpenCode JSON format
 		const { response, inputTokens, outputTokens, cost } = this.parseOutput(output);
 
+		// Consider success if we got valid output (step_finish found) even if exitCode is non-zero
+		// OpenCode may return SIGTERM (143) if killed but still produced valid output
+		const hasValidOutput = inputTokens > 0 || outputTokens > 0 || response !== "Task completed";
 		return {
-			success: exitCode === 0,
+			success: exitCode === 0 || hasValidOutput,
 			response,
 			inputTokens,
 			outputTokens,

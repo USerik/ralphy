@@ -6,67 +6,47 @@ import { loadProjectContext, loadRules, loadBoundaries } from "../../config/load
 export function buildDelegationPrompt(task: string, workDir: string): string {
 	const parts: string[] = [];
 
-	// Project context
+	// CRITICAL: JSON requirement at the very start
+	parts.push(`CRITICAL INSTRUCTION: You MUST respond with ONLY a valid JSON object. No text before or after. No markdown code blocks. Just raw JSON starting with { and ending with }.
+
+DO NOT greet the user. DO NOT ask questions. DO NOT use any tools. Just output the JSON.`);
+
+	// Required output format - put early so it's not forgotten
+	parts.push(`Required JSON format:
+{
+  "taskBreakdown": ["Step 1: description", "Step 2: description"],
+  "context": "Background information",
+  "acceptanceCriteria": ["What must be true when done"],
+  "technicalGuidance": "Technical advice",
+  "potentialPitfalls": ["What to watch out for"],
+  "testingRequirements": "What tests to write"
+}`);
+
+	// Task to delegate
+	parts.push(`Task to analyze and delegate: ${task}`);
+
+	// Project context (brief)
 	const context = loadProjectContext(workDir);
 	if (context) {
-		parts.push(`## Project Context\n${context}`);
+		// Limit context to avoid overwhelming the prompt
+		const briefContext = context.substring(0, 2000);
+		parts.push(`Project context (for your reference only, do not include in response):\n${briefContext}`);
 	}
 
 	// Project rules
 	const rules = loadRules(workDir);
 	if (rules.length > 0) {
-		parts.push(`## Project Rules\n${rules.map((r) => `- ${r}`).join("\n")}`);
+		parts.push(`Project rules to consider:\n${rules.slice(0, 5).map((r) => `- ${r}`).join("\n")}`);
 	}
 
 	// Boundaries
 	const boundaries = loadBoundaries(workDir);
 	if (boundaries.length > 0) {
-		parts.push(`## Boundaries (Never Touch)\n${boundaries.map((b) => `- ${b}`).join("\n")}`);
+		parts.push(`Files to never touch:\n${boundaries.slice(0, 5).map((b) => `- ${b}`).join("\n")}`);
 	}
 
-	// Task to delegate
-	parts.push(`## Task to Delegate\n${task}`);
-
-	// Senior role instructions
-	parts.push(`## Your Role
-
-You are a senior software engineer delegating this task to a junior developer. Your job is to:
-1. Break down the task into clear, actionable steps
-2. Provide context and background information
-3. Define acceptance criteria
-4. Give technical guidance on the best approach
-5. Warn about potential pitfalls
-6. Specify testing requirements
-
-Be specific and thorough. The junior developer will implement exactly what you describe.`);
-
-	// Required output format
-	parts.push(`## Required Output Format
-
-You MUST respond with ONLY a JSON object in the following format (no extra text):
-
-\`\`\`json
-{
-  "taskBreakdown": [
-    "Step 1: Brief description",
-    "Step 2: Brief description",
-    "Step 3: Brief description"
-  ],
-  "context": "Background information the developer needs to know",
-  "acceptanceCriteria": [
-    "Criterion 1: What must be true when done",
-    "Criterion 2: What must be true when done"
-  ],
-  "technicalGuidance": "Specific technical advice on how to approach this (patterns, libraries, etc.)",
-  "potentialPitfalls": [
-    "Pitfall 1: What to watch out for",
-    "Pitfall 2: What to watch out for"
-  ],
-  "testingRequirements": "What tests should be written and what they should verify"
-}
-\`\`\`
-
-IMPORTANT: Return ONLY the JSON object. No additional commentary.`);
+	// Reminder at the end
+	parts.push(`REMINDER: Output ONLY the JSON object. Start your response with { character.`);
 
 	return parts.join("\n\n");
 }
