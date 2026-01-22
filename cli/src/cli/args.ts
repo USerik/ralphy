@@ -93,11 +93,6 @@ export function parseArgs(args: string[]): {
 		process.exit(1);
 	}
 
-	// Warn about parallel mode with supervisor
-	if (supervisorEngine && opts.parallel) {
-		console.warn("Warning: --parallel is not supported with supervisor mode. Running sequentially.");
-	}
-
 	// Determine AI engine
 	let aiEngine = "claude";
 	if (opts.sonnet) aiEngine = "claude";

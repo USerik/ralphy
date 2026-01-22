@@ -6,7 +6,8 @@ import type { AIEngineName } from "../../engines/types.ts";
 import { isBrowserAvailable } from "../../execution/browser.ts";
 import { runParallel } from "../../execution/parallel.ts";
 import { type ExecutionResult, runSequential } from "../../execution/sequential.ts";
-import { runSupervisor } from "../../execution/supervisor.ts";
+import { runParallelSupervisor } from "../../execution/parallel-supervisor.ts";
+import { runSupervisor, type SupervisorExecutionResult } from "../../execution/supervisor.ts";
 import { getDefaultBaseBranch } from "../../git/branch.ts";
 import { createTaskSource } from "../../tasks/index.ts";
 import {
@@ -118,7 +119,11 @@ export async function runLoop(options: RuntimeOptions): Promise<void> {
 	}
 	logInfo(`Tasks remaining: ${remaining}`);
 	if (isSupervisorMode) {
-		logInfo(`Mode: Supervisor (max ${options.maxReviewCycles} review cycles, threshold ${options.approveThreshold})`);
+		if (options.parallel) {
+			logInfo(`Mode: Parallel Supervisor (max ${options.maxParallel} agents, ${options.maxReviewCycles} review cycles)`);
+		} else {
+			logInfo(`Mode: Supervisor (max ${options.maxReviewCycles} review cycles, threshold ${options.approveThreshold})`);
+		}
 	} else if (options.parallel) {
 		logInfo(`Mode: Parallel (max ${options.maxParallel} agents)`);
 	} else {
@@ -133,26 +138,55 @@ export async function runLoop(options: RuntimeOptions): Promise<void> {
 	const activeSettings = buildActiveSettings(options);
 
 	// Run tasks
-	let result: ExecutionResult;
+	let result: ExecutionResult | SupervisorExecutionResult;
 	if (isSupervisorMode) {
-		result = await runSupervisor({
-			compositeEngine: compositeEngine!,
-			taskSource,
-			workDir,
-			skipTests: options.skipTests,
-			skipLint: options.skipLint,
-			dryRun: options.dryRun,
-			maxIterations: options.maxIterations,
-			maxRetries: options.maxRetries,
-			retryDelay: options.retryDelay,
-			branchPerTask: options.branchPerTask,
-			baseBranch,
-			createPr: options.createPr,
-			draftPr: options.draftPr,
-			autoCommit: options.autoCommit,
-			browserEnabled: options.browserEnabled,
-			activeSettings,
-		});
+		if (options.parallel) {
+			// Parallel supervisor mode
+			result = await runParallelSupervisor({
+				compositeEngine: compositeEngine!,
+				taskSource,
+				workDir,
+				skipTests: options.skipTests,
+				skipLint: options.skipLint,
+				dryRun: options.dryRun,
+				maxIterations: options.maxIterations,
+				maxRetries: options.maxRetries,
+				retryDelay: options.retryDelay,
+				branchPerTask: options.branchPerTask,
+				baseBranch,
+				createPr: options.createPr,
+				draftPr: options.draftPr,
+				autoCommit: options.autoCommit,
+				maxParallel: options.maxParallel,
+				prdSource: options.prdSource,
+				prdFile: options.prdFile,
+				prdIsFolder: options.prdIsFolder,
+				skipMerge: options.skipMerge,
+				modelOverride: options.modelOverride,
+				browserEnabled: options.browserEnabled,
+				activeSettings,
+			});
+		} else {
+			// Sequential supervisor mode
+			result = await runSupervisor({
+				compositeEngine: compositeEngine!,
+				taskSource,
+				workDir,
+				skipTests: options.skipTests,
+				skipLint: options.skipLint,
+				dryRun: options.dryRun,
+				maxIterations: options.maxIterations,
+				maxRetries: options.maxRetries,
+				retryDelay: options.retryDelay,
+				branchPerTask: options.branchPerTask,
+				baseBranch,
+				createPr: options.createPr,
+				draftPr: options.draftPr,
+				autoCommit: options.autoCommit,
+				browserEnabled: options.browserEnabled,
+				activeSettings,
+			});
+		}
 	} else if (options.parallel) {
 		result = await runParallel({
 			engine: engine!,

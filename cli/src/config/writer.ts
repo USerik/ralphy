@@ -116,7 +116,7 @@ export function addRule(rule: string, workDir = process.cwd()): void {
  */
 export function logTaskProgress(
 	task: string,
-	status: "completed" | "failed",
+	status: "completed" | "completed-with-warnings" | "failed",
 	workDir = process.cwd(),
 ): void {
 	const progressPath = getProgressPath(workDir);
@@ -126,7 +126,7 @@ export function logTaskProgress(
 	}
 
 	const timestamp = new Date().toISOString().slice(0, 16).replace("T", " ");
-	const icon = status === "completed" ? "✓" : "✗";
+	const icon = status === "failed" ? "✗" : status === "completed-with-warnings" ? "⚠" : "✓";
 	const line = `- [${icon}] ${timestamp} - ${task}\n`;
 
 	appendFileSync(progressPath, line, "utf-8");

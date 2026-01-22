@@ -1,60 +1,51 @@
+import { copyFileSync, cpSync, existsSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { PROGRESS_FILE, RALPHY_DIR } from "../config/loader.ts";
 import { logTaskProgress } from "../config/writer.ts";
 import { execCommand } from "../engines/base.ts";
 import type { CompositeEngine, DelegationResult, ReviewResult } from "../engines/composite.ts";
 import type { AIResult } from "../engines/types.ts";
-import { createTaskBranch, returnToBaseBranch } from "../git/branch.ts";
-import { createPullRequest } from "../git/pr.ts";
+import { getCurrentBranch, returnToBaseBranch } from "../git/branch.ts";
+import {
+	abortMerge,
+	deleteLocalBranch,
+	mergeAgentBranch,
+} from "../git/merge.ts";
+import { cleanupAgentWorktree, createAgentWorktree, getWorktreeBase } from "../git/worktree.ts";
 import type { Task, TaskSource } from "../tasks/types.ts";
+import { YamlTaskSource } from "../tasks/yaml.ts";
 import { logDebug, logError, logInfo, logSuccess, logWarn } from "../ui/logger.ts";
 import { notifyTaskComplete, notifyTaskFailed } from "../ui/notify.ts";
 import { ProgressSpinner } from "../ui/spinner.ts";
+import { resolveConflictsWithAI } from "./conflict-resolution.ts";
 import { buildDelegationPrompt } from "./prompts/delegation.ts";
 import { buildImplementationPrompt } from "./prompts/implementation.ts";
 import { buildReviewPrompt } from "./prompts/review.ts";
 import { isRetryableError, withRetry } from "./retry.ts";
+import type { SupervisorExecutionOptions, SupervisorExecutionResult, SupervisorTaskResult } from "./supervisor.ts";
 
-export interface SupervisorExecutionOptions {
-	compositeEngine: CompositeEngine;
-	taskSource: TaskSource;
-	workDir: string;
-	skipTests: boolean;
-	skipLint: boolean;
-	dryRun: boolean;
-	maxIterations: number;
-	maxRetries: number;
-	retryDelay: number;
-	branchPerTask: boolean;
-	baseBranch: string;
-	createPr: boolean;
-	draftPr: boolean;
-	autoCommit: boolean;
+/**
+ * Extended options for parallel supervisor mode
+ */
+export interface ParallelSupervisorOptions extends SupervisorExecutionOptions {
+	maxParallel: number;
+	prdSource: string;
+	prdFile: string;
+	prdIsFolder?: boolean;
+	skipMerge?: boolean;
+	modelOverride?: string;
 	browserEnabled?: "auto" | "true" | "false";
 	activeSettings?: string[];
 }
 
-export interface SupervisorExecutionResult {
-	tasksCompleted: number;
-	tasksFailed: number;
-	tasksWithWarnings: number;
-	totalInputTokens: number;
-	totalOutputTokens: number;
-	supervisorInputTokens: number;
-	supervisorOutputTokens: number;
-	workerInputTokens: number;
-	workerOutputTokens: number;
-}
-
-export interface SupervisorTaskResult {
-	success: boolean;
-	approved: boolean;
-	score: number;
-	cycles: number;
-	totalInputTokens: number;
-	totalOutputTokens: number;
-	supervisorInputTokens: number;
-	supervisorOutputTokens: number;
-	workerInputTokens: number;
-	workerOutputTokens: number;
+/**
+ * Result from running supervisor in a worktree
+ */
+interface SupervisorWorktreeResult {
+	task: Task;
+	worktreeDir: string;
+	branchName: string;
+	taskResult: SupervisorTaskResult | null;
 	error?: string;
 }
 
@@ -114,18 +105,19 @@ Co-Authored-By: Ralphy Supervisor <ralphy@ralphy.dev>`;
 }
 
 /**
- * Run a single task through supervisor/worker cycles
+ * Run a single supervisor task in a worktree
  */
-async function runSupervisorTask(
+async function runSupervisorTaskInWorktree(
 	task: Task,
 	compositeEngine: CompositeEngine,
-	options: SupervisorExecutionOptions,
+	workDir: string,
+	maxRetries: number,
+	retryDelay: number,
+	autoCommit: boolean,
 ): Promise<SupervisorTaskResult> {
-	const { workDir, maxRetries, retryDelay, autoCommit } = options;
 	const maxCycles = compositeEngine.getOptions().maxReviewCycles;
 	const approveThreshold = compositeEngine.getOptions().approveThreshold;
 
-	const supervisor = compositeEngine.getSupervisor();
 	const worker = compositeEngine.getWorker();
 
 	let totalInputTokens = 0;
@@ -364,10 +356,156 @@ async function runSupervisorTask(
 }
 
 /**
- * Run supervisor mode execution
+ * Run a single supervisor-worker pair in a worktree
  */
-export async function runSupervisor(
-	options: SupervisorExecutionOptions,
+async function runSupervisorInWorktree(
+	compositeEngine: CompositeEngine,
+	task: Task,
+	agentNum: number,
+	baseBranch: string,
+	worktreeBase: string,
+	originalDir: string,
+	prdSource: string,
+	prdFile: string,
+	prdIsFolder: boolean,
+	maxRetries: number,
+	retryDelay: number,
+	autoCommit: boolean,
+): Promise<SupervisorWorktreeResult> {
+	let worktreeDir = "";
+	let branchName = "";
+
+	try {
+		// Create worktree
+		const worktree = await createAgentWorktree(
+			task.title,
+			agentNum,
+			baseBranch,
+			worktreeBase,
+			originalDir,
+		);
+		worktreeDir = worktree.worktreeDir;
+		branchName = worktree.branchName;
+
+		logDebug(`Supervisor ${agentNum}: Created worktree at ${worktreeDir}`);
+
+		// Copy PRD file or folder to worktree
+		if (prdSource === "markdown" || prdSource === "yaml") {
+			const srcPath = join(originalDir, prdFile);
+			const destPath = join(worktreeDir, prdFile);
+			if (existsSync(srcPath)) {
+				copyFileSync(srcPath, destPath);
+			}
+		} else if (prdSource === "markdown-folder" && prdIsFolder) {
+			const srcPath = join(originalDir, prdFile);
+			const destPath = join(worktreeDir, prdFile);
+			if (existsSync(srcPath)) {
+				cpSync(srcPath, destPath, { recursive: true });
+			}
+		}
+
+		// Ensure .ralphy/ exists in worktree
+		const ralphyDir = join(worktreeDir, RALPHY_DIR);
+		if (!existsSync(ralphyDir)) {
+			mkdirSync(ralphyDir, { recursive: true });
+		}
+
+		// Execute supervisor task in worktree
+		const taskResult = await runSupervisorTaskInWorktree(
+			task,
+			compositeEngine,
+			worktreeDir,
+			maxRetries,
+			retryDelay,
+			autoCommit,
+		);
+
+		return { task, worktreeDir, branchName, taskResult };
+	} catch (error) {
+		const errorMsg = error instanceof Error ? error.message : String(error);
+		return { task, worktreeDir, branchName, taskResult: null, error: errorMsg };
+	}
+}
+
+/**
+ * Merge completed supervisor branches back to the base branch
+ */
+async function mergeCompletedSupervisorBranches(
+	branches: string[],
+	targetBranch: string,
+	compositeEngine: CompositeEngine,
+	workDir: string,
+	modelOverride?: string,
+): Promise<void> {
+	if (branches.length === 0) {
+		return;
+	}
+
+	logInfo(`\nMerge phase: merging ${branches.length} branch(es) into ${targetBranch}`);
+
+	const merged: string[] = [];
+	const failed: string[] = [];
+
+	// Use supervisor engine for conflict resolution (senior AI is better suited)
+	const supervisorEngine = compositeEngine.getSupervisor();
+
+	for (const branch of branches) {
+		logInfo(`Merging ${branch}...`);
+
+		const mergeResult = await mergeAgentBranch(branch, targetBranch, workDir);
+
+		if (mergeResult.success) {
+			logSuccess(`Merged ${branch}`);
+			merged.push(branch);
+		} else if (mergeResult.hasConflicts && mergeResult.conflictedFiles) {
+			// Try AI-assisted conflict resolution using supervisor engine
+			logWarn(`Merge conflict in ${branch}, attempting AI resolution...`);
+
+			const resolved = await resolveConflictsWithAI(
+				supervisorEngine,
+				mergeResult.conflictedFiles,
+				branch,
+				workDir,
+				modelOverride,
+			);
+
+			if (resolved) {
+				logSuccess(`Resolved conflicts and merged ${branch}`);
+				merged.push(branch);
+			} else {
+				logError(`Failed to resolve conflicts for ${branch}`);
+				await abortMerge(workDir);
+				failed.push(branch);
+			}
+		} else {
+			logError(`Failed to merge ${branch}: ${mergeResult.error || "Unknown error"}`);
+			failed.push(branch);
+		}
+	}
+
+	// Delete successfully merged branches
+	for (const branch of merged) {
+		const deleted = await deleteLocalBranch(branch, workDir, true);
+		if (deleted) {
+			logDebug(`Deleted merged branch: ${branch}`);
+		}
+	}
+
+	// Summary
+	if (merged.length > 0) {
+		logSuccess(`Successfully merged ${merged.length} branch(es)`);
+	}
+	if (failed.length > 0) {
+		logWarn(`Failed to merge ${failed.length} branch(es): ${failed.join(", ")}`);
+		logInfo("These branches have been preserved for manual review.");
+	}
+}
+
+/**
+ * Run parallel supervisor mode execution
+ */
+export async function runParallelSupervisor(
+	options: ParallelSupervisorOptions,
 ): Promise<SupervisorExecutionResult> {
 	const {
 		compositeEngine,
@@ -375,24 +513,47 @@ export async function runSupervisor(
 		workDir,
 		dryRun,
 		maxIterations,
-		branchPerTask,
-		baseBranch,
-		createPr,
-		draftPr,
+		maxRetries,
+		retryDelay,
+		autoCommit,
+		maxParallel,
+		prdSource,
+		prdFile,
+		prdIsFolder = false,
+		skipMerge,
+		modelOverride,
+		baseBranch: optionsBaseBranch,
 	} = options;
 
 	const result: SupervisorExecutionResult = {
 		tasksCompleted: 0,
-		supervisorInputTokens: 0,
-		supervisorOutputTokens: 0,
-		workerInputTokens: 0,
-		workerOutputTokens: 0,
 		tasksFailed: 0,
 		tasksWithWarnings: 0,
 		totalInputTokens: 0,
 		totalOutputTokens: 0,
+		supervisorInputTokens: 0,
+		supervisorOutputTokens: 0,
+		workerInputTokens: 0,
+		workerOutputTokens: 0,
 	};
 
+	// Get worktree base directory
+	const worktreeBase = getWorktreeBase(workDir);
+	logDebug(`Worktree base: ${worktreeBase}`);
+
+	// Save starting branch to restore after merge phase
+	const startingBranch = await getCurrentBranch(workDir);
+
+	// Save original base branch for merge phase
+	const baseBranch = optionsBaseBranch || startingBranch;
+
+	// Track completed branches for merge phase
+	const completedBranches: string[] = [];
+
+	// Global agent counter to ensure unique numbering across batches
+	let globalAgentNum = 0;
+
+	// Process tasks in batches
 	let iteration = 0;
 
 	while (true) {
@@ -402,90 +563,135 @@ export async function runSupervisor(
 			break;
 		}
 
-		// Get next task
-		const task = await taskSource.getNextTask();
-		if (!task) {
+		// Get tasks for this batch
+		let tasks: Task[] = [];
+
+		// For YAML sources, try to get tasks from the same parallel group
+		if (taskSource instanceof YamlTaskSource) {
+			const nextTask = await taskSource.getNextTask();
+			if (!nextTask) break;
+
+			const group = await taskSource.getParallelGroup(nextTask.title);
+			if (group > 0) {
+				tasks = await taskSource.getTasksInGroup(group);
+			} else {
+				tasks = [nextTask];
+			}
+		} else {
+			// For other sources, get all remaining tasks
+			tasks = await taskSource.getAllTasks();
+		}
+
+		if (tasks.length === 0) {
 			logSuccess("All tasks completed!");
 			break;
 		}
 
+		// Limit to maxParallel
+		const batch = tasks.slice(0, maxParallel);
 		iteration++;
-		const remaining = await taskSource.countRemaining();
-		logInfo(`Task ${iteration}: ${task.title} (${remaining} remaining)`);
 
-		// Create branch if needed
-		let branch: string | null = null;
-		if (branchPerTask && baseBranch) {
-			try {
-				branch = await createTaskBranch(task.title, baseBranch, workDir);
-				logDebug(`Created branch: ${branch}`);
-			} catch (error) {
-				logError(`Failed to create branch: ${error}`);
+		logInfo(`Batch ${iteration}: ${batch.length} supervisor-worker pair(s) in parallel`);
+
+		if (dryRun) {
+			logInfo("(dry run) Skipping batch");
+			// Mark tasks complete in dry-run to avoid infinite loop
+			for (const task of batch) {
+				await taskSource.markComplete(task.id);
 			}
+			continue;
 		}
 
-		// Execute task
-		if (dryRun) {
-			logInfo("(dry run) Skipped");
-			// Mark task complete even in dry-run to avoid infinite loop
-			await taskSource.markComplete(task.id);
-		} else {
-			const taskResult = await runSupervisorTask(task, compositeEngine, options);
+		// Run supervisor-worker pairs in parallel
+		const promises = batch.map((task) => {
+			globalAgentNum++;
+			return runSupervisorInWorktree(
+				compositeEngine,
+				task,
+				globalAgentNum,
+				baseBranch,
+				worktreeBase,
+				workDir,
+				prdSource,
+				prdFile,
+				prdIsFolder,
+				maxRetries,
+				retryDelay,
+				autoCommit,
+			);
+		});
 
-			result.totalInputTokens += taskResult.totalInputTokens;
-			result.totalOutputTokens += taskResult.totalOutputTokens;
-			result.supervisorInputTokens += taskResult.supervisorInputTokens;
-			result.supervisorOutputTokens += taskResult.supervisorOutputTokens;
-			result.workerInputTokens += taskResult.workerInputTokens;
-			result.workerOutputTokens += taskResult.workerOutputTokens;
+		const results = await Promise.all(promises);
 
-			if (taskResult.success) {
-				// Mark task complete
+		// Process results
+		for (const agentResult of results) {
+			const { task, worktreeDir, branchName, taskResult, error } = agentResult;
+
+			if (error) {
+				logError(`Task "${task.title}" failed: ${error}`);
+				logTaskProgress(task.title, "failed", workDir);
+				result.tasksFailed++;
+				notifyTaskFailed(task.title, error);
+			} else if (taskResult?.success) {
+				// Aggregate tokens
+				result.totalInputTokens += taskResult.totalInputTokens;
+				result.totalOutputTokens += taskResult.totalOutputTokens;
+				result.supervisorInputTokens += taskResult.supervisorInputTokens;
+				result.supervisorOutputTokens += taskResult.supervisorOutputTokens;
+				result.workerInputTokens += taskResult.workerInputTokens;
+				result.workerOutputTokens += taskResult.workerOutputTokens;
+
 				await taskSource.markComplete(task.id);
 
 				if (taskResult.approved) {
+					logSuccess(`Task "${task.title}" completed (approved)`);
 					logTaskProgress(task.title, "completed", workDir);
 					result.tasksCompleted++;
 					notifyTaskComplete(task.title);
 				} else {
+					logWarn(`Task "${task.title}" completed with warnings`);
 					logTaskProgress(task.title, "completed-with-warnings", workDir);
 					result.tasksWithWarnings++;
 					notifyTaskComplete(task.title);
 				}
 
-				// Create PR if needed
-				if (createPr && branch && baseBranch) {
-					const prBody = `Automated PR created by Ralphy
-
-**Supervisor**: ${compositeEngine.getSupervisor().name}
-**Worker**: ${compositeEngine.getWorker().name}
-**Review Score**: ${taskResult.score.toFixed(2)}
-**Review Cycles**: ${taskResult.cycles}
-**Status**: ${taskResult.approved ? "Approved" : "Completed with warnings"}`;
-
-					const prUrl = await createPullRequest(
-						branch,
-						baseBranch,
-						task.title,
-						prBody,
-						draftPr,
-						workDir,
-					);
-
-					if (prUrl) {
-						logSuccess(`PR created: ${prUrl}`);
-					}
+				// Track successful branch for merge phase
+				if (branchName) {
+					completedBranches.push(branchName);
 				}
 			} else {
+				const errMsg = taskResult?.error || "Unknown error";
+				logError(`Task "${task.title}" failed: ${errMsg}`);
 				logTaskProgress(task.title, "failed", workDir);
 				result.tasksFailed++;
-				notifyTaskFailed(task.title, taskResult.error || "Unknown error");
+				notifyTaskFailed(task.title, errMsg);
+			}
+
+			// Cleanup worktree
+			if (worktreeDir) {
+				const cleanup = await cleanupAgentWorktree(worktreeDir, branchName, workDir);
+				if (cleanup.leftInPlace) {
+					logInfo(`Worktree left in place (uncommitted changes): ${worktreeDir}`);
+				}
 			}
 		}
+	}
 
-		// Return to base branch if we created one
-		if (branchPerTask && baseBranch) {
-			await returnToBaseBranch(baseBranch, workDir);
+	// Merge phase: merge completed branches back to base branch
+	if (!skipMerge && !dryRun && completedBranches.length > 0) {
+		await mergeCompletedSupervisorBranches(
+			completedBranches,
+			baseBranch,
+			compositeEngine,
+			workDir,
+			modelOverride,
+		);
+
+		// Restore starting branch if we're not already on it
+		const currentBranch = await getCurrentBranch(workDir);
+		if (currentBranch !== startingBranch) {
+			logDebug(`Restoring starting branch: ${startingBranch}`);
+			await returnToBaseBranch(startingBranch, workDir);
 		}
 	}
 
